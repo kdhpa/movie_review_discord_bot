@@ -1,6 +1,11 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from db_config import DATABASE_URL
+import os
+
+if DATABASE_URL:
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 class Database:
     def __init__(self):

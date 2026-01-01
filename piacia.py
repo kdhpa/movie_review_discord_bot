@@ -6,6 +6,11 @@ from review_form import FORM
 from database import Database
 import json
 import io
+import os
+
+if Token:
+    Token = os.getenv("Token")
+
 
 class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
     def __init__(self, db):
