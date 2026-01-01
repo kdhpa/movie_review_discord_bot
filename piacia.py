@@ -24,7 +24,7 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
     def return_score_emoji(self, score):
         float_number = min( float(score), 5 )
         int_number = int(float_number)
-        none_number = int(5-int_number)
+        none_number = int(5-float_number)
 
         float_number = float_number % 1
 
@@ -37,7 +37,6 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         elif 0.6 <= float_number <= 0.9:
             score_emoji += ':waning_gibbous_moon:'
 
-        print(none_number)
         if none_number > 0:
             score_emoji += ':new_moon:' * none_number
 
