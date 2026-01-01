@@ -1,8 +1,15 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from db_config import DATABASE_URL
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_conn():
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode="require"
+    )
 
 
 class Database:
@@ -56,20 +63,20 @@ class Database:
                    score, one_line_review, additional_comment):
         """리뷰 저장"""
         try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT INTO reviews
-                (user_id, username, movie_title, movie_year, director, score,
-                 one_line_review, additional_comment)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            ''', (user_id, username, movie_title, movie_year, director, score,
-                  one_line_review, additional_comment))
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        INSERT INTO reviews
+                        (user_id, username, movie_title, movie_year, director, score,
+                         one_line_review, additional_comment)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    ''', (
+                        user_id, username, movie_title, movie_year,
+                        director, score, one_line_review, additional_comment
+                    ))
 
-            review_id = cursor.fetchone()[0]
-            self.conn.commit()
-            cursor.close()
-            return review_id
+                    return cursor.fetchone()[0]
         except Exception as e:
             print(f"❌ Failed to save review: {e}")
             return None
@@ -84,7 +91,6 @@ class Database:
             ''', (user_id, movie_title))
 
             result = cursor.fetchone()
-            cursor.close()
             return result is not None
         except Exception as e:
             print(f"❌ Failed to check review: {e}")
@@ -93,17 +99,16 @@ class Database:
     def get_user_reviews(self, user_id, limit=10):
         """유저별 리뷰 조회"""
         try:
-            cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute('''
-                SELECT * FROM reviews
-                WHERE user_id = %s
-                ORDER BY created_at DESC
-                LIMIT %s
-            ''', (user_id, limit))
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        SELECT * FROM reviews
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    ''', (user_id, limit))
 
-            reviews = cursor.fetchall()
-            cursor.close()
-            return reviews
+                    return cursor.fetchall()
         except Exception as e:
             print(f"❌ Failed to get user reviews: {e}")
             return []
@@ -111,20 +116,20 @@ class Database:
     def get_movie_stats(self, movie_title):
         """영화별 평점 통계"""
         try:
-            cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute('''
-                SELECT
-                    COUNT(*) as review_count,
-                    AVG(score) as avg_score,
-                    MAX(score) as max_score,
-                    MIN(score) as min_score
-                FROM reviews
-                WHERE movie_title = %s
-            ''', (movie_title,))
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        SELECT
+                            COUNT(*) as review_count,
+                            AVG(score) as avg_score,
+                            MAX(score) as max_score,
+                            MIN(score) as min_score
+                        FROM reviews
+                        WHERE movie_title = %s
+                    ''', (movie_title,))
 
-            stats = cursor.fetchone()
-            cursor.close()
-            return stats
+                    stats = cursor.fetchone()
+                    return stats
         except Exception as e:
             print(f"❌ Failed to get movie stats: {e}")
             return None
@@ -132,16 +137,17 @@ class Database:
     def get_all_reviews(self, limit=50):
         """전체 리뷰 히스토리"""
         try:
-            cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute('''
-                SELECT * FROM reviews
-                ORDER BY created_at DESC
-                LIMIT %s
-            ''', (limit,))
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+                    cursor.execute('''
+                        SELECT * FROM reviews
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    ''', (limit,))
 
-            reviews = cursor.fetchall()
-            cursor.close()
-            return reviews
+                    reviews = cursor.fetchall()
+                    return reviews
         except Exception as e:
             print(f"❌ Failed to get all reviews: {e}")
             return []
@@ -149,17 +155,17 @@ class Database:
     def delete_review(self, user_id, movie_title):
         """유저의 특정 영화 리뷰 삭제"""
         try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                DELETE FROM reviews
-                WHERE user_id = %s AND movie_title = %s
-                RETURNING id
-            ''', (user_id, movie_title))
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        DELETE FROM reviews
+                        WHERE user_id = %s AND movie_title = %s
+                        RETURNING id
+                    ''', (user_id, movie_title))
 
-            deleted = cursor.fetchone()
-            self.conn.commit()
-            cursor.close()
-            return deleted is not None
+                    deleted = cursor.fetchone()
+                    self.conn.commit()
+                    return deleted is not None
         except Exception as e:
             print(f"❌ Failed to delete review: {e}")
             return False

@@ -1,13 +1,13 @@
 import discord
 import requests
 from discord.ext import commands
-# from dico_token import Token
+from dico_token import Token
 from review_form import FORM
 from database import Database
 import json
 import io
 import os
-Token = os.getenv("Token")
+# Token = os.getenv("Token")
 
 
 class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
@@ -22,8 +22,9 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         self.add_item(discord.ui.TextInput(label="영화 추가 내용", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
 
     def return_score_emoji(self, score):
-        float_number = float(score)
+        float_number = min( float(score), 5 )
         int_number = int(float_number)
+        none_number = int(5-int_number)
 
         float_number = float_number % 1
 
@@ -35,6 +36,8 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
             score_emoji += ':last_quarter_moon:'
         elif 0.6 <= float_number <= 0.9:
             score_emoji += ':waning_gibbous_moon:'
+
+        score_emoji += ':new_moon:' * none_number
 
         return score_emoji
 
@@ -75,11 +78,11 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         # 별점 검증
         try:
             score_float = float(score)
-            if not (0 <= score_float <= 10):
-                await interaction.response.send_message("❌ 별점은 0~10 사이의 숫자를 입력해주세요!")
+            if not (0 <= score_float <= 5):
+                await interaction.response.send_message("❌ 별점은 0~5 사이의 숫자를 입력해주세요!",ephemeral=True)
                 return
         except ValueError:
-            await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!")
+            await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!", ephemeral=True)
             return
 
         # 영화 정보 가져오기
@@ -87,7 +90,7 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
 
         # 중복 리뷰 확인
         if self.db.has_review(interaction.user.id, title):
-            await interaction.response.send_message(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n기존 리뷰를 삭제하려면 `/리뷰삭제`를 사용하세요.")
+            await interaction.response.send_message(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n기존 리뷰를 삭제하려면 `/리뷰삭제`를 사용하세요.", ephemeral=True)
             return
 
         # DB에 저장
@@ -150,7 +153,7 @@ async def my_reviews_command(interaction: discord.Interaction):
     reviews = bot.db.get_user_reviews(interaction.user.id, limit=5)
 
     if not reviews:
-        await interaction.response.send_message("❌ 작성한 리뷰가 없습니다.")
+        await interaction.response.send_message("❌ 작성한 리뷰가 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(title=f"{interaction.user.name}님의 최근 리뷰", color=0x00ff00)
@@ -170,7 +173,7 @@ async def movie_stats_command(interaction: discord.Interaction, 영화제목: st
     stats = bot.db.get_movie_stats(영화제목)
 
     if not stats or stats['review_count'] == 0:
-        await interaction.response.send_message(f"❌ '{영화제목}'에 대한 리뷰가 없습니다.")
+        await interaction.response.send_message(f"❌ '{영화제목}'에 대한 리뷰가 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(title=f"📊 {영화제목} 통계", color=0x3498db)
