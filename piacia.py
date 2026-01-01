@@ -178,9 +178,9 @@ async def movie_stats_command(interaction: discord.Interaction, 영화제목: st
 
     embed = discord.Embed(title=f"📊 {영화제목} 통계", color=0x3498db)
     embed.add_field(name="리뷰 개수", value=f"{stats['review_count']}개", inline=True)
-    embed.add_field(name="평균 평점", value=f"{stats['avg_score']:.2f}/10", inline=True)
-    embed.add_field(name="최고 평점", value=f"{stats['max_score']}/10", inline=True)
-    embed.add_field(name="최저 평점", value=f"{stats['min_score']}/10", inline=True)
+    embed.add_field(name="평균 평점", value=f"{stats['avg_score']:.2f}/5", inline=True)
+    embed.add_field(name="최고 평점", value=f"{stats['max_score']}/5", inline=True)
+    embed.add_field(name="최저 평점", value=f"{stats['min_score']}/5", inline=True)
 
     await interaction.response.send_message(embed=embed,ephemeral=True)
 
