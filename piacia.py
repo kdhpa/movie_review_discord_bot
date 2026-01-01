@@ -1,15 +1,13 @@
 import discord
 import requests
 from discord.ext import commands
-from dico_token import Token
+# from dico_token import Token
 from review_form import FORM
 from database import Database
 import json
 import io
 import os
-
-if Token:
-    Token = os.getenv("Token")
+Token = os.getenv("Token")
 
 
 class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
