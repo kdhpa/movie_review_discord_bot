@@ -37,7 +37,8 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         elif 0.6 <= float_number <= 0.9:
             score_emoji += ':waning_gibbous_moon:'
 
-        score_emoji += ':new_moon:' * none_number
+        if none_number != 0:
+            score_emoji += ':new_moon:' * none_number
 
         return score_emoji
 
@@ -162,7 +163,7 @@ async def my_reviews_command(interaction: discord.Interaction):
         score_emoji = "🌕" * int(review['score'])
         embed.add_field(
             name=f"{review['movie_title']} ({review['movie_year']})",
-            value=f"⭐ {score_emoji} {review['score']}/10\n💬 \"{review['one_line_review']}\"",
+            value=f"⭐ {score_emoji} {review['score']}/5\n💬 \"{review['one_line_review']}\"",
             inline=False
         )
 
