@@ -97,8 +97,7 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
             director=director,
             score=score_float,
             one_line_review=line_comment,
-            additional_comment=comment,
-            poster_url=img_path
+            additional_comment=comment
         )
 
         filled_form = FORM.format(
