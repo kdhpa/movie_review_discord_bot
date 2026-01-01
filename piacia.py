@@ -89,7 +89,7 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
             return
 
         # DB에 저장
-        review_id = self.db.save_review(
+        self.db.save_review(
             user_id=interaction.user.id,
             username=str(interaction.user),
             movie_title=title,
@@ -109,9 +109,9 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
             comment=comment
         )
 
-        # DB 저장 성공 메시지 추가
-        if review_id:
-            filled_form += f"\n\n✅ 리뷰가 데이터베이스에 저장되었습니다! (ID: {review_id})"
+        if comment:  # None, "", 공백이면 자동으로 false
+            filled_form += f"\n\n📝추가 코멘트 : {comment}"
+
 
         if img_path:
             img_response = requests.get(img_path)
@@ -161,7 +161,7 @@ async def my_reviews_command(interaction: discord.Interaction):
             inline=False
         )
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed,ephemeral=True)
 
 @discord.app_commands.command(name="영화통계", description="특정 영화의 평점 통계를 조회합니다.")
 async def movie_stats_command(interaction: discord.Interaction, 영화제목: str):
@@ -177,7 +177,7 @@ async def movie_stats_command(interaction: discord.Interaction, 영화제목: st
     embed.add_field(name="최고 평점", value=f"{stats['max_score']}/10", inline=True)
     embed.add_field(name="최저 평점", value=f"{stats['min_score']}/10", inline=True)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed,ephemeral=True)
 
 @discord.app_commands.command(name="리뷰삭제", description="특정 영화의 내 리뷰를 삭제합니다.")
 async def delete_review_command(interaction: discord.Interaction, 영화제목: str):
@@ -194,10 +194,10 @@ async def delete_review_command(interaction: discord.Interaction, 영화제목: 
                 deleted_count += 1
 
         if deleted_count > 0:
-            await interaction.response.send_message(f"✅ '{영화제목}' 리뷰가 삭제되었습니다. (메시지 {deleted_count}개 삭제)")
+            await interaction.response.send_message(f"✅ '{영화제목}' 리뷰가 삭제되었습니다. (메시지 {deleted_count}개 삭제)",ephemeral=True)
         else:
-            await interaction.response.send_message(f"✅ '{영화제목}' 리뷰가 DB에서 삭제되었습니다. (채널 메시지는 찾지 못함)")
+            await interaction.response.send_message(f"✅ '{영화제목}' 리뷰가 DB에서 삭제되었습니다. (채널 메시지는 찾지 못함)",ephemeral=True)
     else:
-        await interaction.response.send_message(f"❌ '{영화제목}' 리뷰를 찾을 수 없습니다.")
+        await interaction.response.send_message(f"❌ '{영화제목}' 리뷰를 찾을 수 없습니다.",ephemeral=True)
 
 bot.run(Token)
