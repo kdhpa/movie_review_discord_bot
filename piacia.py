@@ -23,7 +23,7 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
 
     def return_score_emoji(self, score):
         float_number = float(score) % 1
-        int_number = int(float_number)
+        int_number = int(score)
 
         score_emoji = ":full_moon:" * int_number
 
