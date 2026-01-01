@@ -22,7 +22,7 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         self.add_item(discord.ui.TextInput(label="영화 추가 내용", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
 
     def return_score_emoji(self, score):
-        float_number = float(score)
+        float_number = float(score) % 1
         int_number = int(float_number)
 
         score_emoji = ":full_moon:" * int_number
