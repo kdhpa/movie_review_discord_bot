@@ -84,14 +84,15 @@ class Database:
     def has_review(self, user_id, movie_title):
         """유저가 해당 영화에 리뷰를 작성했는지 확인"""
         try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT id FROM reviews
-                WHERE user_id = %s AND movie_title = %s
-            ''', (user_id, movie_title))
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT id FROM reviews
+                        WHERE user_id = %s AND movie_title = %s
+                    ''', (user_id, movie_title))
 
-            result = cursor.fetchone()
-            return result is not None
+                    result = cursor.fetchone()
+                    return result is not None
         except Exception as e:
             print(f"❌ Failed to check review: {e}")
             return False

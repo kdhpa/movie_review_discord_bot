@@ -67,8 +67,8 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         
             return title, year, director, img_url
 
-
-        return response
+        # 검색 결과가 없을 때 기본값 반환
+        return name, "N/A", "N/A", None
 
     async def on_submit(self, interaction: discord.Interaction):
         title = self.children[0].value
