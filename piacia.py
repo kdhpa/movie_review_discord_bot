@@ -86,12 +86,15 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
             await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!", ephemeral=True)
             return
 
+        # 시간이 오래 걸리는 작업 전에 defer 호출 (15분까지 응답 가능)
+        await interaction.response.defer()
+
         # 영화 정보 가져오기
         title, year, director, img_path = self.namuWikiReturn(title)
 
         # 중복 리뷰 확인
         if self.db.has_review(interaction.user.id, title):
-            await interaction.response.send_message(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n기존 리뷰를 삭제하려면 `/리뷰삭제`를 사용하세요.", ephemeral=True)
+            await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n기존 리뷰를 삭제하려면 `/리뷰삭제`를 사용하세요.", ephemeral=True)
             return
 
         # DB에 저장
@@ -122,9 +125,9 @@ class ReviewForm(discord.ui.Modal, title="리뷰 작성 폼"):
         if img_path:
             img_response = requests.get(img_path)
             file = discord.File(io.BytesIO(img_response.content), filename="poster.jpg")
-            await interaction.response.send_message(filled_form, file=file)
+            await interaction.followup.send(filled_form, file=file)
         else:
-            await interaction.response.send_message(filled_form)
+            await interaction.followup.send(filled_form)
 
 class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
