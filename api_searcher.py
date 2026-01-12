@@ -68,6 +68,7 @@ class ContentSearcher:
         query ($search: String) {
             Media(search: $search, type: MANGA) {
                 title {
+                    korean
                     romaji
                     native
                     english
