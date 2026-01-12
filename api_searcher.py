@@ -102,7 +102,7 @@ class ContentSearcher:
 
                 # 제목 (한국어 > 영어 > 로마자 순으로 선택)
                 title_data = media['title']
-                title = title_data.get('native') or title_data.get('english') or title_data.get('romaji') or name
+                title = title_data.get('korean') or title_data.get('native') or title_data.get('english') or name
 
                 # 연도
                 year = str(media['startDate']['year']) if media.get('startDate') and media['startDate'].get('year') else "N/A"
@@ -111,7 +111,7 @@ class ContentSearcher:
                 author = "N/A"
                 if media.get('staff') and media['staff'].get('nodes'):
                     staff = media['staff']['nodes'][0]
-                    author = staff['name'].get('native') or staff['name'].get('full') or "N/A"
+                    author = staff['name'].get('korean') or staff['name'].get('full') or "N/A"
 
                 # 커버 이미지
                 img_url = media['coverImage']['large'] if media.get('coverImage') else None
