@@ -142,31 +142,10 @@ class ContentSearcher:
                 if webtoons:
                     webtoon = webtoons[0]
                     title = webtoon.get('titleName', name)
-                    author = webtoon.get('author', 'N/A')
+                    author = webtoon.get('displayAuthor', 'N/A')
                     img_url = webtoon.get('thumbnailUrl')
 
                     return title, "네이버웹툰", author, img_url
         except Exception as e:
             print(f"⚠️ Naver webtoon search failed: {e}")
-
-        # 2. 카카오 웹툰 검색 (fallback)
-        try:
-            kakao_url = f"https://gateway-kw.kakao.com/search/v1/search/webtoons?query={name}"
-            kakao_headers = {**headers, 'Referer': 'https://webtoon.kakao.com/'}
-
-            response = requests.get(kakao_url, headers=kakao_headers)
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get('data', [])
-
-                if results:
-                    webtoon = results[0]
-                    title = webtoon.get('title', name)
-                    author = webtoon.get('author', {}).get('name', 'N/A')
-                    img_url = webtoon.get('thumbnail', {}).get('url')
-
-                    return title, "카카오웹툰", author, img_url
-        except Exception as e:
-            print(f"⚠️ Kakao webtoon search failed: {e}")
-
         return name, "N/A", "N/A", None

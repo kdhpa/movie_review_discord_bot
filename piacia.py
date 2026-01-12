@@ -252,7 +252,7 @@ class CategorySelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="영화/드라마/애니", value="tmdb", emoji="🎬", description="TMDB에서 검색 (자동 분류)"),
             discord.SelectOption(label="만화", value="manga", emoji="📚", description="AniList에서 검색"),
-            discord.SelectOption(label="웹툰", value="webtoon", emoji="📱", description="네이버/카카오에서 검색"),
+            discord.SelectOption(label="웹툰", value="webtoon", emoji="📱", description="네이버에서만 검색(제발 카카오 유명한거는 ani로)"),
         ]
         super().__init__(placeholder="리뷰할 카테고리를 선택하세요", options=options)
 
