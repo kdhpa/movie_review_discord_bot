@@ -118,6 +118,8 @@ class ContentSearcher:
                 img_url = media['coverImage']['large'] if media.get('coverImage') else None
 
                 return title, year, author, img_url
+            else:
+                print(f"❌ AniList API error: {data}")
 
         except Exception as e:
             print(f"❌ AniList API error: {e}")
