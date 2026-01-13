@@ -65,6 +65,9 @@ class ContentSearcher:
             item_id = item['id']
             director = None
 
+            if not await is_korean(title):
+                title = await translate_to_korean(title)
+
             if media_type == 'movie':
                 credits_url = f"https://api.themoviedb.org/3/movie/{item_id}/credits?api_key={TMDB_API_KEY}&language=ko-KR"
                 async with session.get(credits_url) as credits_response:
