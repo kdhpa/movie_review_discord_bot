@@ -114,7 +114,7 @@ class ContentSearcher:
 
                 title = None
                 # 먼저 title에서 찾기
-                for lang in ['ko', 'en']:
+                for lang in ['en', 'ko']:
                     if lang in title_dict:
                         title = title_dict[lang]
                         break
