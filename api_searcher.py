@@ -1,7 +1,30 @@
 import requests
 import os
+import re
 
 TMDB_API_KEY = "ed858620292ea4710cb4dc894449f6ea"
+
+
+def is_korean(text):
+    """한글이 포함되어 있는지 확인"""
+    if not text:
+        return False
+    return bool(re.search('[가-힣]', text))
+
+
+def translate_to_korean(text):
+    """영어/일본어 이름을 한국어로 번역"""
+    if not text or text == "N/A" or is_korean(text):
+        return text
+
+    try:
+        from googletrans import Translator
+        translator = Translator()
+        result = translator.translate(text, dest='ko')
+        return result.text
+    except:
+        # 번역 실패 시 원본 반환
+        return text
 
 
 class ContentSearcher:
@@ -43,15 +66,26 @@ class ContentSearcher:
 
             # 감독/제작자 정보
             item_id = item['id']
+            director = None
+
             if media_type == 'movie':
-                credits_url = f"https://api.themoviedb.org/3/movie/{item_id}/credits?api_key={TMDB_API_KEY}"
+                credits_url = f"https://api.themoviedb.org/3/movie/{item_id}/credits?api_key={TMDB_API_KEY}&language=ko-KR"
                 credits = requests.get(credits_url).json()
-                director = next((crew['name'] for crew in credits.get('crew', []) if crew['job'] == 'Director'), "N/A")
+                director_info = next((crew for crew in credits.get('crew', []) if crew['job'] == 'Director'), None)
+
+                if director_info:
+                    director = director_info.get('name')
+                    # 한글이 아니면 번역 시도
+                    if not is_korean(director):
+                        director = translate_to_korean(director)
             else:  # tv - created_by 사용
                 details_url = f"https://api.themoviedb.org/3/tv/{item_id}?api_key={TMDB_API_KEY}&language=ko-KR"
                 details = requests.get(details_url).json()
                 creators = details.get('created_by', [])
-                director = creators[0]['name'] if creators else "N/A"
+                if creators:
+                    director = creators[0]['name']
+                    if not is_korean(director):
+                        director = translate_to_korean(director)
 
             # 포스터 이미지
             poster_path = item.get('poster_path')
@@ -59,11 +93,11 @@ class ContentSearcher:
 
             return title, year, director, img_url, category
 
-        return None, None, None, None
+        return None, None, None, None, None
 
     @staticmethod
     def search_manga(name):
-        #MangaDex API로 만화 검색
+        """MangaDex API로 만화 검색"""
         url = f"https://api.mangadex.org/manga?title={name}&limit=1&includes[]=author&includes[]=cover_art"
 
         try:
@@ -74,13 +108,13 @@ class ContentSearcher:
                 manga = data['data'][0]
                 attributes = manga.get('attributes', {})
 
-                # 제목 (ko > ja > en 순으로 선택)
+                # 제목 (ko > en 순으로 선택)
                 title_dict = attributes.get('title', {})
                 alt_titles = attributes.get('altTitles', [])
 
                 title = None
                 # 먼저 title에서 찾기
-                for lang in ['ko', 'ja', 'ja-ro', 'en']:
+                for lang in ['ko', 'en']:
                     if lang in title_dict:
                         title = title_dict[lang]
                         break
@@ -96,15 +130,18 @@ class ContentSearcher:
                     title = list(title_dict.values())[0] if title_dict else name
 
                 # 연도
-                year = str(attributes.get('year')) if attributes.get('year') else "N/A"
+                year = str(attributes.get('year')) if attributes.get('year') else None
 
                 # 작가 (relationships에서 author 찾기)
-                author = "N/A"
+                author = None
                 relationships = manga.get('relationships', [])
                 for rel in relationships:
                     if rel.get('type') == 'author':
                         author_attrs = rel.get('attributes', {})
-                        author = author_attrs.get('name', "N/A")
+                        author = author_attrs.get('name')
+                        # 한글이 아니면 번역 시도
+                        if author and not is_korean(author):
+                            author = translate_to_korean(author)
                         break
 
                 # 커버 이미지 (cover_art relationship에서 찾기)
@@ -129,12 +166,11 @@ class ContentSearcher:
 
     @staticmethod
     def search_webtoon(name):
-        """네이버/카카오 웹툰 검색"""
+        """네이버 웹툰 검색"""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
 
-        # 1. 네이버 웹툰 검색
         try:
             search_url = f"https://comic.naver.com/api/search/all?keyword={name}"
             response = requests.get(search_url, headers=headers)
@@ -146,10 +182,11 @@ class ContentSearcher:
                 if webtoons:
                     webtoon = webtoons[0]
                     title = webtoon.get('titleName', name)
-                    author = webtoon.get('displayAuthor', 'N/A')
+                    author = webtoon.get('displayAuthor')
                     img_url = webtoon.get('thumbnailUrl')
 
                     return title, "네이버웹툰", author, img_url
         except Exception as e:
             print(f"⚠️ Naver webtoon search failed: {e}")
+
         return None, None, None, None
