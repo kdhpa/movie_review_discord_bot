@@ -1,5 +1,6 @@
 import discord
-import requests
+import aiohttp
+import asyncio
 from discord.ext import commands
 from review_form import MOVIE_FORM, MANGA_FORM, WEBTOON_FORM
 
@@ -68,79 +69,83 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
 
         original_title = title
 
-        # 카테고리별 검색
-        if self.category == 'tmdb':
-            title, year, director, img_url, db_category = ContentSearcher.search_tmdb(title)
-        elif self.category == 'manga':
-            title, year, director, img_url = ContentSearcher.search_manga(title)
-            db_category = 'manga'
-        else:  # webtoon
-            title, year, director, img_url = ContentSearcher.search_webtoon(title)
-            db_category = 'webtoon'
+        async with aiohttp.ClientSession() as session:
+            # 카테고리별 검색
+            if self.category == 'tmdb':
+                title, year, director, img_url, db_category = await ContentSearcher.search_tmdb(session, title)
+            elif self.category == 'manga':
+                title, year, director, img_url = await ContentSearcher.search_manga(session, title)
+                db_category = 'manga'
+            else:  # webtoon
+                title, year, director, img_url = await ContentSearcher.search_webtoon(session, title)
+                db_category = 'webtoon'
 
-        # 검색 결과 없음 확인 (title, year, director 중 하나라도 N/A면 실패)
-        if title == None or director == None or year == None:
-            await interaction.followup.send(f"❌ '{original_title}'를 찾을 수 없습니다. 정확한 제목으로 다시 시도해주세요.", ephemeral=True)
-            return
+            # 검색 결과 없음 확인 (title, year, director 중 하나라도 N/A면 실패)
+            if title == None or director == None or year == None:
+                await interaction.followup.send(f"❌ '{original_title}'를 찾을 수 없습니다. 정확한 제목으로 다시 시도해주세요.", ephemeral=True)
+                return
 
-        # 중복 확인
-        if self.db.has_review(interaction.user.id, title, db_category):
-            await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.", ephemeral=True)
-            return
+            # 중복 확인
+            if self.db.has_review(interaction.user.id, title, db_category):
+                await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.", ephemeral=True)
+                return
 
-        # DB 저장
-        self.db.save_review(
-            user_id=interaction.user.id,
-            username=str(interaction.user),
-            movie_title=title,
-            movie_year=year,
-            director=director,
-            score=score_float,
-            one_line_review=line_comment,
-            additional_comment=comment,
-            category=db_category
-        )
-
-        # 카테고리별 출력 형식
-        emoji = CATEGORY_EMOJI.get(db_category, "🎬")
-        cat_name = CATEGORY_NAME.get(db_category, "영화")
-
-        if self.category == 'tmdb':
-            filled_form = MOVIE_FORM.format(
-                title=title,
-                director_name=director,
-                year=year,
-                score=return_score_emoji(score),
-                one_line_text=line_comment
-            )
-            filled_form = filled_form.replace("🎬", emoji)
-            filled_form += f"\n🏷️ 카테고리: {cat_name}"
-        elif self.category == 'manga':
-            filled_form = MANGA_FORM.format(
-                title=title,
-                author=director,
-                year=year,
-                score=return_score_emoji(score),
-                one_line_text=line_comment
-            )
-        else:  # webtoon
-            filled_form = WEBTOON_FORM.format(
-                title=title,
-                platform=year,
-                author=director,
-                score=return_score_emoji(score),
-                one_line_text=line_comment
+            # DB 저장
+            self.db.save_review(
+                user_id=interaction.user.id,
+                username=str(interaction.user),
+                movie_title=title,
+                movie_year=year,
+                director=director,
+                score=score_float,
+                one_line_review=line_comment,
+                additional_comment=comment,
+                category=db_category
             )
 
-        if comment:
-            filled_form += f"\n\n📝추가 코멘트 : {comment}"
+            # 카테고리별 출력 형식
+            emoji = CATEGORY_EMOJI.get(db_category, "🎬")
+            cat_name = CATEGORY_NAME.get(db_category, "영화")
 
-        if img_url:
-            img_response = requests.get(img_url)
-            file = discord.File(io.BytesIO(img_response.content), filename="image.jpg")
-            await interaction.followup.send(filled_form, file=file)
-        else:
-            await interaction.followup.send(filled_form)
+            if self.category == 'tmdb':
+                filled_form = MOVIE_FORM.format(
+                    title=title,
+                    director_name=director,
+                    year=year,
+                    score=return_score_emoji(score),
+                    one_line_text=line_comment
+                )
+                filled_form = filled_form.replace("🎬", emoji)
+                filled_form += f"\n🏷️ 카테고리: {cat_name}"
+            elif self.category == 'manga':
+                filled_form = MANGA_FORM.format(
+                    title=title,
+                    author=director,
+                    year=year,
+                    score=return_score_emoji(score),
+                    one_line_text=line_comment
+                )
+            else:  # webtoon
+                filled_form = WEBTOON_FORM.format(
+                    title=title,
+                    platform=year,
+                    author=director,
+                    score=return_score_emoji(score),
+                    one_line_text=line_comment
+                )
+
+            if comment:
+                filled_form += f"\n\n📝추가 코멘트 : {comment}"
+
+            if img_url:
+                async with session.get(img_url) as img_response:
+                    if img_response.status == 200:
+                        file = discord.File(io.BytesIO(await img_response.read()), filename="image.jpg")
+                        await interaction.followup.send(filled_form, file=file)
+                    else:
+                        await interaction.followup.send(filled_form)
+            else:
+                await interaction.followup.send(filled_form)
 
 
 # ==================== Bot Class ====================
