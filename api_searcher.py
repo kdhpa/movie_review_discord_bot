@@ -111,15 +111,22 @@ class ContentSearcher:
                 alt_titles = attributes.get('altTitles', [])
 
                 title = None
-                for lang in ['en', 'ko']:
-                    if lang in title_dict:
-                        title = title_dict[lang]
-                        break
+                # 1. title 객체에서 한국어 제목 찾기
+                if 'ko' in title_dict:
+                    title = title_dict['ko']
+
+                # 2. altTitles에서 한국어 제목 찾기
                 if not title:
                     for alt in alt_titles:
                         if 'ko' in alt:
                             title = alt['ko']
                             break
+                
+                # 3. title 객체에서 영어 제목 찾기
+                if not title and 'en' in title_dict:
+                    title = title_dict['en']
+
+                # 4. 그래도 없으면 첫번째 제목 사용
                 if not title:
                     title = list(title_dict.values())[0] if title_dict else name
 
