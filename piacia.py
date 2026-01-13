@@ -37,13 +37,14 @@ def return_score_emoji(score):
     return score_emoji
 
 
-# ==================== Modal Classes ====================
+# ==================== 통합 Modal ====================
 
-class TMDBReviewForm(discord.ui.Modal, title="영화/드라마/애니 리뷰 작성"):
-    def __init__(self, db):
+class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
+    def __init__(self, db, category):
         super().__init__()
         self.db = db
-        self.add_item(discord.ui.TextInput(label="작품 이름", placeholder="영화, 드라마, 애니메이션 제목을 입력하세요"))
+        self.category = category  # 'tmdb', 'manga', 'webtoon'
+        self.add_item(discord.ui.TextInput(label="작품 이름", placeholder="제목을 입력하세요"))
         self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
         self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
         self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
@@ -65,11 +66,25 @@ class TMDBReviewForm(discord.ui.Modal, title="영화/드라마/애니 리뷰 작
 
         await interaction.response.defer()
 
-        # TMDB 검색 (카테고리 자동 분류: movie/drama/anime)
-        title, year, director, img_url, category = ContentSearcher.search_tmdb(title)
+        original_title = title
+
+        # 카테고리별 검색
+        if self.category == 'tmdb':
+            title, year, director, img_url, db_category = ContentSearcher.search_tmdb(title)
+        elif self.category == 'manga':
+            title, year, director, img_url = ContentSearcher.search_manga(title)
+            db_category = 'manga'
+        else:  # webtoon
+            title, year, director, img_url = ContentSearcher.search_webtoon(title)
+            db_category = 'webtoon'
+
+        # 검색 결과 없음 확인 (title, year, director 중 하나라도 N/A면 실패)
+        if title == None or director == None or year == None:
+            await interaction.followup.send(f"❌ '{original_title}'를 찾을 수 없습니다. 정확한 제목으로 다시 시도해주세요.", ephemeral=True)
+            return
 
         # 중복 확인
-        if self.db.has_review(interaction.user.id, title, category):
+        if self.db.has_review(interaction.user.id, title, db_category):
             await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.", ephemeral=True)
             return
 
@@ -83,196 +98,49 @@ class TMDBReviewForm(discord.ui.Modal, title="영화/드라마/애니 리뷰 작
             score=score_float,
             one_line_review=line_comment,
             additional_comment=comment,
-            category=category
+            category=db_category
         )
 
-        # 카테고리별 이모지 선택
-        emoji = CATEGORY_EMOJI.get(category, "🎬")
-        cat_name = CATEGORY_NAME.get(category, "영화")
+        # 카테고리별 출력 형식
+        emoji = CATEGORY_EMOJI.get(db_category, "🎬")
+        cat_name = CATEGORY_NAME.get(db_category, "영화")
 
-        filled_form = MOVIE_FORM.format(
-            title=title,
-            director_name=director,
-            year=year,
-            score=return_score_emoji(score),
-            one_line_text=line_comment
-        )
-        # 카테고리 표시 추가
-        filled_form = filled_form.replace("🎬", emoji)
-        filled_form += f"\n🏷️ 카테고리: {cat_name}"
+        if self.category == 'tmdb':
+            filled_form = MOVIE_FORM.format(
+                title=title,
+                director_name=director,
+                year=year,
+                score=return_score_emoji(score),
+                one_line_text=line_comment
+            )
+            filled_form = filled_form.replace("🎬", emoji)
+            filled_form += f"\n🏷️ 카테고리: {cat_name}"
+        elif self.category == 'manga':
+            filled_form = MANGA_FORM.format(
+                title=title,
+                author=director,
+                year=year,
+                score=return_score_emoji(score),
+                one_line_text=line_comment
+            )
+        else:  # webtoon
+            filled_form = WEBTOON_FORM.format(
+                title=title,
+                platform=year,
+                author=director,
+                score=return_score_emoji(score),
+                one_line_text=line_comment
+            )
 
         if comment:
             filled_form += f"\n\n📝추가 코멘트 : {comment}"
 
         if img_url:
             img_response = requests.get(img_url)
-            file = discord.File(io.BytesIO(img_response.content), filename="poster.jpg")
+            file = discord.File(io.BytesIO(img_response.content), filename="image.jpg")
             await interaction.followup.send(filled_form, file=file)
         else:
             await interaction.followup.send(filled_form)
-
-
-class MangaReviewForm(discord.ui.Modal, title="만화 리뷰 작성"):
-    def __init__(self, db):
-        super().__init__()
-        self.db = db
-        self.add_item(discord.ui.TextInput(label="만화 이름", placeholder="제목을 입력하세요"))
-        self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
-        self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
-        self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        title = self.children[0].value
-        score = self.children[1].value
-        line_comment = self.children[2].value
-        comment = self.children[3].value
-
-        try:
-            score_float = float(score)
-            if not (0 <= score_float <= 5):
-                await interaction.response.send_message("❌ 별점은 0~5 사이의 숫자를 입력해주세요!", ephemeral=True)
-                return
-        except ValueError:
-            await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        # 만화 정보 검색 (AniList)
-        title, year, author, img_url = ContentSearcher.search_manga(title)
-
-        # 중복 확인
-        if self.db.has_review(interaction.user.id, title, 'manga'):
-            await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.", ephemeral=True)
-            return
-
-        # DB 저장
-        self.db.save_review(
-            user_id=interaction.user.id,
-            username=str(interaction.user),
-            movie_title=title,
-            movie_year=year,
-            director=author,  # 만화는 작가
-            score=score_float,
-            one_line_review=line_comment,
-            additional_comment=comment,
-            category='manga'
-        )
-
-        filled_form = MANGA_FORM.format(
-            title=title,
-            author=author,
-            year=year,
-            score=return_score_emoji(score),
-            one_line_text=line_comment
-        )
-
-        if comment:
-            filled_form += f"\n\n📝추가 코멘트 : {comment}"
-
-        if img_url:
-            img_response = requests.get(img_url)
-            file = discord.File(io.BytesIO(img_response.content), filename="cover.jpg")
-            await interaction.followup.send(filled_form, file=file)
-        else:
-            await interaction.followup.send(filled_form)
-
-
-class WebtoonReviewForm(discord.ui.Modal, title="웹툰 리뷰 작성"):
-    def __init__(self, db):
-        super().__init__()
-        self.db = db
-        self.add_item(discord.ui.TextInput(label="웹툰 이름", placeholder="제목을 입력하세요"))
-        self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
-        self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
-        self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        title = self.children[0].value
-        score = self.children[1].value
-        line_comment = self.children[2].value
-        comment = self.children[3].value
-
-        try:
-            score_float = float(score)
-            if not (0 <= score_float <= 5):
-                await interaction.response.send_message("❌ 별점은 0~5 사이의 숫자를 입력해주세요!", ephemeral=True)
-                return
-        except ValueError:
-            await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        # 웹툰 정보 검색
-        title, platform, author, img_url = ContentSearcher.search_webtoon(title)
-
-        # 중복 확인
-        if self.db.has_review(interaction.user.id, title, 'webtoon'):
-            await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.", ephemeral=True)
-            return
-
-        # DB 저장 (platform을 movie_year 필드에 저장)
-        self.db.save_review(
-            user_id=interaction.user.id,
-            username=str(interaction.user),
-            movie_title=title,
-            movie_year=platform,  # 웹툰은 플랫폼
-            director=author,  # 웹툰은 작가
-            score=score_float,
-            one_line_review=line_comment,
-            additional_comment=comment,
-            category='webtoon'
-        )
-
-        filled_form = WEBTOON_FORM.format(
-            title=title,
-            platform=platform,
-            author=author,
-            score=return_score_emoji(score),
-            one_line_text=line_comment
-        )
-
-        if comment:
-            filled_form += f"\n\n📝추가 코멘트 : {comment}"
-
-        if img_url:
-            img_response = requests.get(img_url)
-            file = discord.File(io.BytesIO(img_response.content), filename="thumbnail.jpg")
-            await interaction.followup.send(filled_form, file=file)
-        else:
-            await interaction.followup.send(filled_form)
-
-
-# ==================== Category Select ====================
-
-class CategorySelect(discord.ui.Select):
-    def __init__(self, db):
-        self.db = db
-        options = [
-            discord.SelectOption(label="영화/드라마/애니", value="tmdb", emoji="🎬", description="TMDB에서 검색 (자동 분류)"),
-            discord.SelectOption(label="만화", value="manga", emoji="📚", description="AniList에서 검색"),
-            discord.SelectOption(label="웹툰", value="webtoon", emoji="📱", description="네이버에서만 검색(제발 카카오 유명한거는 ani로)"),
-        ]
-        super().__init__(placeholder="리뷰할 카테고리를 선택하세요", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        category = self.values[0]
-
-        if category == "tmdb":
-            modal = TMDBReviewForm(self.db)
-        elif category == "manga":
-            modal = MangaReviewForm(self.db)
-        else:
-            modal = WebtoonReviewForm(self.db)
-
-        await interaction.response.send_modal(modal)
-
-
-class CategoryView(discord.ui.View):
-    def __init__(self, db):
-        super().__init__(timeout=60)
-        self.add_item(CategorySelect(db))
 
 
 # ==================== Bot Class ====================
@@ -299,9 +167,15 @@ bot = MyBot(command_prefix="/", intents=discord.Intents.default())
 # ==================== Slash Commands ====================
 
 @discord.app_commands.command(name="한줄평", description="리뷰를 작성합니다.")
-async def review_command(interaction: discord.Interaction):
-    view = CategoryView(bot.db)
-    await interaction.response.send_message("📝 리뷰할 카테고리를 선택하세요:", view=view, ephemeral=True)
+@discord.app_commands.describe(카테고리="리뷰할 콘텐츠 종류")
+@discord.app_commands.choices(카테고리=[
+    discord.app_commands.Choice(name="🎬 영화/드라마/애니", value="tmdb"),
+    discord.app_commands.Choice(name="📚 만화", value="manga"),
+    discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
+])
+async def review_command(interaction: discord.Interaction, 카테고리: str):
+    modal = ReviewForm(bot.db, 카테고리)
+    await interaction.response.send_modal(modal)
 
 
 @discord.app_commands.command(name="내리뷰", description="내가 작성한 리뷰 목록을 조회합니다.")

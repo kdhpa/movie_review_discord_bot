@@ -59,72 +59,73 @@ class ContentSearcher:
 
             return title, year, director, img_url, category
 
-        return name, "N/A", "N/A", None, "movie"
+        return None, None, None, None
 
     @staticmethod
     def search_manga(name):
-        """AniList GraphQL API로 만화 검색"""
-        query = '''
-        query ($search: String) {
-            Media(search: $search, type: MANGA) {
-                title {
-                    korean
-                    romaji
-                    native
-                    english
-                }
-                startDate {
-                    year
-                }
-                staff(sort: RELEVANCE, perPage: 1) {
-                    nodes {
-                        name {
-                            full
-                            native
-                        }
-                    }
-                }
-                coverImage {
-                    large
-                }
-            }
-        }
-        '''
-
-        variables = {'search': name}
-        url = 'https://graphql.anilist.co'
+        #MangaDex API로 만화 검색
+        url = f"https://api.mangadex.org/manga?title={name}&limit=1&includes[]=author&includes[]=cover_art"
 
         try:
-            response = requests.post(url, json={'query': query, 'variables': variables})
+            response = requests.get(url)
             data = response.json()
 
-            if data.get('data') and data['data'].get('Media'):
-                media = data['data']['Media']
+            if data.get('data') and len(data['data']) > 0:
+                manga = data['data'][0]
+                attributes = manga.get('attributes', {})
 
-                # 제목 (한국어 > 영어 > 로마자 순으로 선택)
-                title_data = media['title']
-                title = title_data.get('korean') or title_data.get('native') or title_data.get('english') or name
+                # 제목 (ko > ja > en 순으로 선택)
+                title_dict = attributes.get('title', {})
+                alt_titles = attributes.get('altTitles', [])
+
+                title = None
+                # 먼저 title에서 찾기
+                for lang in ['ko', 'ja', 'ja-ro', 'en']:
+                    if lang in title_dict:
+                        title = title_dict[lang]
+                        break
+
+                # altTitles에서 한국어 찾기
+                if not title:
+                    for alt in alt_titles:
+                        if 'ko' in alt:
+                            title = alt['ko']
+                            break
+
+                if not title:
+                    title = list(title_dict.values())[0] if title_dict else name
 
                 # 연도
-                year = str(media['startDate']['year']) if media.get('startDate') and media['startDate'].get('year') else "N/A"
+                year = str(attributes.get('year')) if attributes.get('year') else "N/A"
 
-                # 작가
+                # 작가 (relationships에서 author 찾기)
                 author = "N/A"
-                if media.get('staff') and media['staff'].get('nodes'):
-                    staff = media['staff']['nodes'][0]
-                    author = staff['name'].get('korean') or staff['name'].get('full') or "N/A"
+                relationships = manga.get('relationships', [])
+                for rel in relationships:
+                    if rel.get('type') == 'author':
+                        author_attrs = rel.get('attributes', {})
+                        author = author_attrs.get('name', "N/A")
+                        break
 
-                # 커버 이미지
-                img_url = media['coverImage']['large'] if media.get('coverImage') else None
+                # 커버 이미지 (cover_art relationship에서 찾기)
+                img_url = None
+                for rel in relationships:
+                    if rel.get('type') == 'cover_art':
+                        cover_attrs = rel.get('attributes', {})
+                        filename = cover_attrs.get('fileName')
+                        if filename:
+                            manga_id = manga.get('id')
+                            img_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
+                        break
 
                 return title, year, author, img_url
             else:
-                print(f"❌ AniList API error: {data}")
+                print(f"❌ MangaDex: No results for '{name}'")
 
         except Exception as e:
-            print(f"❌ AniList API error: {e}")
+            print(f"❌ MangaDex API error: {e}")
 
-        return name, "N/A", "N/A", None
+        return None, None, None, None
 
     @staticmethod
     def search_webtoon(name):
@@ -151,4 +152,4 @@ class ContentSearcher:
                     return title, "네이버웹툰", author, img_url
         except Exception as e:
             print(f"⚠️ Naver webtoon search failed: {e}")
-        return name, "N/A", "N/A", None
+        return None, None, None, None
