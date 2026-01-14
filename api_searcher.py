@@ -3,11 +3,24 @@ import asyncio
 import os
 import re
 import requests
+from urllib.parse import quote
 from bs4 import BeautifulSoup
 from googletrans import Translator
 
 TMDB_API_KEY = os.getenv("TMDB_API")
 translator = Translator()
+
+def _is_blocked_or_challenge(html: str) -> bool:
+    h = (html or "").lower()
+    return any(k in h for k in [
+        "cloudflare",
+        "captcha",
+        "checking your browser",
+        "just a moment",
+        "enable javascript",
+        "bot detection",
+    ])
+
 
 def _extract_namu_title(soup: BeautifulSoup, html: str) -> str | None:
     # 1) OG title/meta
