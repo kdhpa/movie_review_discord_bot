@@ -109,43 +109,56 @@ def _scrape_namu_wiki(query, headers):
 
 
 def _scrape_wikipedia(query, headers):
-    """위키백과 API에서 정보 추출"""
     try:
-        # 위키백과 검색 API
-        search_url = f"https://ko.wikipedia.org/w/api.php"
-        params = {
+        api = "https://ko.wikipedia.org/w/api.php"
+
+        # 1) 검색해서 title 확보
+        search_params = {
             'action': 'query',
             'list': 'search',
             'srsearch': query,
             'format': 'json',
             'srlimit': 1
         }
-
-        response = requests.get(search_url, params=params, headers=headers, timeout=5)
-        data = response.json()
-
+        r = requests.get(api, params=search_params, headers=headers, timeout=5)
+        data = r.json()
         results = data.get('query', {}).get('search', [])
         if not results:
             return None
 
-        # 첫 번째 검색 결과의 제목
         title = results[0]['title']
-        snippet = results[0].get('snippet', '')
 
-        # snippet에서 HTML 태그 제거 (<span> 태그 등)
-        soup = BeautifulSoup(snippet, 'html.parser')
-        clean_snippet = soup.get_text(strip=True)
+        # 2) title로 본문 요약 + 썸네일 가져오기
+        page_params = {
+            'action': 'query',
+            'format': 'json',
+            'prop': 'extracts|pageimages',
+            'titles': title,
+            'exintro': 1,
+            'explaintext': 1,
+            'piprop': 'thumbnail',
+            'pithumbsize': 400
+        }
+        r2 = requests.get(api, params=page_params, headers=headers, timeout=5)
+        data2 = r2.json()
 
-        # 작가 정보는 snippet에서 추출 시도
-        author = None
-        if '작가' in clean_snippet:
-            author = clean_snippet.split('작가')[-1].split('|')[0].strip()[:50]
+        pages = data2.get('query', {}).get('pages', {})
+        page = next(iter(pages.values()), None)
+        if not page:
+            return None
+
+        extract = page.get('extract', '') or ''
+        thumb = (page.get('thumbnail') or {}).get('source')
+
+        # 3) 요약문에서 작가/연도 추출(휴리스틱)
+        author = _extract_author_from_kowiki_extract(extract)
+        year = _extract_year_from_text(extract)
 
         return {
             'title': title,
             'author': author or "정보 없음",
-            'year': None,
-            'img_url': None,
+            'year': year,              # 문자열 "2022" 같은 형태
+            'img_url': thumb,
             'source': '위키백과'
         }
 
@@ -153,6 +166,32 @@ def _scrape_wikipedia(query, headers):
         print(f"    ⚠️ 위키백과 파싱 실패: {e}")
         return None
 
+
+def _extract_author_from_kowiki_extract(text: str):
+    """
+    한국어 위키 요약문에서 흔히 나오는 패턴:
+    - '...는 OOO가 ...' / '...는 OOO의 ...' / '...는 OOO이 ...'
+    """
+    t = " ".join(text.split())
+    patterns = [
+        r'([가-힣A-Za-z·\s]+?)가\s+(?:쓰고\s+그린|그린|쓴)\s+(?:일본\s+)?(?:만화|소설|작품)',
+        r'([가-힣A-Za-z·\s]+?)의\s+(?:일본\s+)?(?:만화|소설|작품)',
+        r'원작[:\s]*([가-힣A-Za-z·\s]+)',
+        r'작가[:\s]*([가-힣A-Za-z·\s]+)',
+        r'글[:\s]*([가-힣A-Za-z·\s]+)',
+        r'그림[:\s]*([가-힣A-Za-z·\s]+)',
+    ]
+    for p in patterns:
+        m = re.search(p, t)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _extract_year_from_text(text: str):
+    # 가장 먼저 등장하는 4자리 연도(2000~2099) 추출
+    m = re.search(r'\b(20\d{2})\b', text)
+    return m.group(1) if m else None
 
 def _scrape_google_search(query, content_type, headers):
     """구글 검색 결과에서 정보 추출 (최후의 수단)"""
