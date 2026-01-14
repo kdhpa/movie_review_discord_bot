@@ -243,23 +243,15 @@ def _extract_author_from_text(text: str):
 
 
 def _scrape_wikipedia(query: str, headers: dict):
-    """
-    위키백과(ko)에서:
-      1) search로 pageid/title 확보
-      2) pageid로 revisions(content) = 통짜 위키텍스트 가져오기 (extracts 미사용)
-      3) pageimages로 썸네일 가져오기
-      4) 위키텍스트 기반으로 작가/연도 추출
-    """
     try:
         api = "https://ko.wikipedia.org/w/api.php"
 
         # 1) 검색 -> pageid/title
         search_params = {
             "action": "query",
-            "list": "search",
-            "srsearch": query,
             "format": "json",
-            "srlimit": 1,
+            "titles": query,
+            "redirects": 1,  # 넘겨주기까지 포함
         }
         r = requests.get(api, params=search_params, headers=headers, timeout=5)
         r.raise_for_status()
