@@ -5,113 +5,200 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from googletrans import Translator
-from googlesearch import search as google_search
 
 TMDB_API_KEY = os.getenv("TMDB_API")
 translator = Translator()
 
 
 async def scrape_google_search_info(query, content_type="만화"):
-    """Google 검색 결과에서 제목, 작가, 연도 정보 추출"""
+    """검색 결과에서 제목, 작가 정보 추출 (나무위키 → 위키백과 → 구글 순서)"""
     try:
         await asyncio.sleep(1)  # rate limit 방지
         loop = asyncio.get_event_loop()
 
         def _scrape():
-            search_query = f"{query} {content_type}"
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
 
-            try:
-                # Google 검색
-                urls = list(google_search(search_query, num_results=5, lang='ko'))
+            # 1차 시도: 나무위키 직접 접근 (가장 빠름)
+            print(f"  [1] 나무위키에서 '{query}' 검색 중...")
+            namu_result = _scrape_namu_wiki(query, headers)
+            if namu_result:
+                return namu_result
 
-                for url in urls:
-                    try:
-                        response = requests.get(url, headers=headers, timeout=5)
-                        if response.status_code != 200:
-                            continue
+            # 2차 시도: 위키백과 API
+            print(f"  [2] 위키백과에서 '{query}' 검색 중...")
+            wiki_result = _scrape_wikipedia(query, headers)
+            if wiki_result:
+                return wiki_result
 
-                        soup = BeautifulSoup(response.text, 'html.parser')
+            # 3차 시도: 구글 검색 (느리지만 최후의 수단)
+            print(f"  [3] 구글에서 '{query} {content_type}' 검색 중...")
+            google_result = _scrape_google_search(query, content_type, headers)
+            if google_result:
+                return google_result
 
-                        # 나무위키에서 추출
-                        if 'namu.wiki' in url:
-                            title = soup.find('h1', {'class': 'wiki-title'})
-                            if title:
-                                title_text = title.get_text(strip=True)
-
-                                # 작가/저자 정보 추출
-                                author = None
-                                author_patterns = ['저자', '작가', '원작', '만화가']
-                                for pattern in author_patterns:
-                                    author_elem = soup.find(string=re.compile(f'{pattern}|{pattern}', re.IGNORECASE))
-                                    if author_elem:
-                                        # 다음 텍스트 노드가 작가명
-                                        parent = author_elem.parent
-                                        if parent and parent.next_sibling:
-                                            author = parent.next_sibling.get_text(strip=True)
-                                            break
-
-                                # 연도 추출
-                                year = None
-                                year_match = re.search(r'(20\d{2})', response.text)
-                                if year_match:
-                                    year = year_match.group(1)
-
-                                if title_text:
-                                    return {
-                                        'title': title_text,
-                                        'author': author or "정보 없음",
-                                        'year': year,
-                                        'img_url': None
-                                    }
-
-                        # Wikipedia에서 추출
-                        elif 'wikipedia' in url:
-                            title = soup.find('h1', {'class': 'firstHeading'})
-                            if title:
-                                title_text = title.get_text(strip=True)
-
-                                # 정보상자(infobox)에서 작가 추출
-                                author = None
-                                infobox = soup.find('table', {'class': 'infobox'})
-                                if infobox:
-                                    rows = infobox.find_all('tr')
-                                    for i, row in enumerate(rows):
-                                        if re.search(r'저자|작가|원작|Author', row.get_text(), re.IGNORECASE):
-                                            if i + 1 < len(rows):
-                                                author = rows[i + 1].get_text(strip=True)
-                                                break
-
-                                year = None
-                                year_match = re.search(r'(20\d{2})', response.text)
-                                if year_match:
-                                    year = year_match.group(1)
-
-                                if title_text:
-                                    return {
-                                        'title': title_text,
-                                        'author': author or "정보 없음",
-                                        'year': year,
-                                        'img_url': None
-                                    }
-
-                    except Exception as e:
-                        print(f"⚠️ URL 파싱 실패 ({url}): {e}")
-                        continue
-
-                return None
-
-            except Exception as e:
-                print(f"❌ Google 검색 실패: {e}")
-                return None
+            return None
 
         result = await loop.run_in_executor(None, _scrape)
         return result
 
     except Exception as e:
-        print(f"❌ Google 스크래핑 에러: {e}")
+        print(f"❌ 스크래핑 에러: {e}")
+        return None
+
+
+def _scrape_namu_wiki(query, headers):
+    """나무위키에서 정보 추출"""
+    try:
+        url = f"https://namu.wiki/w/{query}"
+        response = requests.get(url, headers=headers, timeout=5)
+
+        if response.status_code == 404:
+            return None
+
+        if response.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # 제목 추출
+        title_elem = soup.find('h1', {'class': 'wiki-title'})
+        if not title_elem:
+            return None
+
+        title = title_elem.get_text(strip=True)
+
+        # 작가/저자 정보 추출 (정보 박스에서)
+        author = None
+        year = None
+
+        # 정보 박스 찾기
+        info_box = soup.find('table', {'class': 'wikitable'})
+        if info_box:
+            rows = info_box.find_all('tr')
+            for row in rows:
+                cells = row.find_all('td')
+                if len(cells) >= 2:
+                    label = cells[0].get_text(strip=True).lower()
+                    value = cells[1].get_text(strip=True)
+
+                    # 작가/저자/원작 찾기
+                    if any(k in label for k in ['작가', '저자', '원작', '작화', '각본']):
+                        if not author:
+                            author = value
+                            break
+
+        # 연도 정규식으로 추출
+        year_match = re.search(r'(20\d{2})', response.text)
+        if year_match:
+            year = year_match.group(1)
+
+        return {
+            'title': title,
+            'author': author or "정보 없음",
+            'year': year,
+            'img_url': None,
+            'source': '나무위키'
+        }
+
+    except Exception as e:
+        print(f"    ⚠️ 나무위키 파싱 실패: {e}")
+        return None
+
+
+def _scrape_wikipedia(query, headers):
+    """위키백과 API에서 정보 추출"""
+    try:
+        # 위키백과 검색 API
+        search_url = f"https://ko.wikipedia.org/w/api.php"
+        params = {
+            'action': 'query',
+            'list': 'search',
+            'srsearch': query,
+            'format': 'json',
+            'srlimit': 1
+        }
+
+        response = requests.get(search_url, params=params, headers=headers, timeout=5)
+        data = response.json()
+
+        results = data.get('query', {}).get('search', [])
+        if not results:
+            return None
+
+        # 첫 번째 검색 결과의 제목
+        title = results[0]['title']
+        snippet = results[0].get('snippet', '')
+
+        # snippet에서 HTML 태그 제거 (<span> 태그 등)
+        soup = BeautifulSoup(snippet, 'html.parser')
+        clean_snippet = soup.get_text(strip=True)
+
+        # 작가 정보는 snippet에서 추출 시도
+        author = None
+        if '작가' in clean_snippet:
+            author = clean_snippet.split('작가')[-1].split('|')[0].strip()[:50]
+
+        return {
+            'title': title,
+            'author': author or "정보 없음",
+            'year': None,
+            'img_url': None,
+            'source': '위키백과'
+        }
+
+    except Exception as e:
+        print(f"    ⚠️ 위키백과 파싱 실패: {e}")
+        return None
+
+
+def _scrape_google_search(query, content_type, headers):
+    """구글 검색 결과에서 정보 추출 (최후의 수단)"""
+    try:
+        search_url = f"https://www.google.com/search?q={query}+{content_type}&hl=ko"
+        response = requests.get(search_url, headers=headers, timeout=5)
+
+        if response.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # 검색 결과 snippet에서 첫 번째 결과 찾기
+        search_results = soup.find_all('div', {'class': 'g'})
+
+        for result in search_results:
+            # 제목 찾기
+            title_elem = result.find('h3')
+            if not title_elem:
+                continue
+
+            title = title_elem.get_text(strip=True)
+
+            # snippet에서 추가 정보 추출
+            snippet_elem = result.find('div', {'style': '-webkit-line-clamp:2'})
+            snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+
+            # 작가 정보 추출 시도
+            author = None
+            if '작가' in snippet or '저자' in snippet:
+                parts = snippet.split('작가')[-1] if '작가' in snippet else snippet.split('저자')[-1]
+                author = parts.split(',')[0].strip()[:50]
+
+            if title:  # 제목이 있으면 반환
+                return {
+                    'title': title,
+                    'author': author or "정보 없음",
+                    'year': None,
+                    'img_url': None,
+                    'source': '구글 검색'
+                }
+
+        return None
+
+    except Exception as e:
+        print(f"    ⚠️ 구글 검색 파싱 실패: {e}")
         return None
 
 
@@ -327,10 +414,6 @@ class ContentSearcher:
             # 이미지는 원래 MangaDex 결과가 있으면 사용, 없으면 None
             img_url = result[3] if result else None
             return google_info['title'], google_info.get('year'), google_info.get('author'), img_url
-
-        # 4차: 검색 결과가 전혀 없으면 원본 제목 반환
-        if result[0] is not None:
-            return result
 
         print(f"❌ MangaDex/Google: No results for '{original_name}'")
         return None, None, None, None
