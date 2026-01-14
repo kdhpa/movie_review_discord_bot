@@ -242,31 +242,65 @@ def _extract_author_from_text(text: str):
     return None
 
 
-def _scrape_wikipedia(query: str, headers: dict):
+def _pick_first_non_missing_page(pages: dict):
+    # pages는 {"-1": {...missing...}} 같은 게 올 수 있어서 non-missing을 골라야 함
+    for p in pages.values():
+        if isinstance(p, dict) and "missing" not in p:
+            return p
+    return None
+
+def _normalize_key(s: str) -> str:
+    return re.sub(r"\s+", "", (s or "")).lower()
+
+def _resolve_exact_title(api: str, query: str, headers: dict):
+    params = {
+        "action": "query",
+        "format": "json",
+        "titles": query,
+        "redirects": 1,  # 넘겨주기 처리
+    }
+    data = requests.get(api, params=params, headers=headers, timeout=5).json()
+    pages = data.get("query", {}).get("pages", {})
+    page = _pick_first_non_missing_page(pages)
+    if not page:
+        return None
+    return page.get("title"), page.get("pageid")
+
+def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = False):
     try:
         api = "https://ko.wikipedia.org/w/api.php"
 
-        # 1) 검색 -> pageid/title
-        search_params = {
-            "action": "query",
-            "format": "json",
-            "titles": query,
-            "redirects": 1,  # 넘겨주기까지 포함
-        }
-        r = requests.get(api, params=search_params, headers=headers, timeout=5)
-        r.raise_for_status()
-        data = r.json()
+        # 0) 정확 제목(또는 리다이렉트) 먼저 확인
+        resolved = _resolve_exact_title(api, query, headers)
+        if resolved:
+            title, pageid = resolved
+        else:
+            if not allow_search_fallback:
+                return None
 
-        results = data.get("query", {}).get("search", [])
-        if not results:
-            return None
+            # 0-b) (옵션) 검색 fallback: 이 경우는 "정확 문서"가 아니라 "관련 문서"일 수 있음
+            search_params = {
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "format": "json",
+                "srlimit": 1,
+            }
+            data = requests.get(api, params=search_params, headers=headers, timeout=5).json()
+            results = data.get("query", {}).get("search", [])
+            if not results:
+                return None
 
-        title = results[0].get("title")
-        pageid = results[0].get("pageid")
-        if not title or not pageid:
-            return None
+            title = results[0].get("title")
+            pageid = results[0].get("pageid")
+            if not title or not pageid:
+                return None
 
-        # 2) 통짜 위키텍스트 가져오기
+            # 너무 엉뚱한 문서 컷(원하면 완화 가능)
+            if _normalize_key(title) != _normalize_key(query):
+                return None
+
+        # 1) 통짜 위키텍스트
         content_params = {
             "action": "query",
             "format": "json",
@@ -276,12 +310,9 @@ def _scrape_wikipedia(query: str, headers: dict):
             "rvprop": "content",
             "redirects": 1,
         }
-        r2 = requests.get(api, params=content_params, headers=headers, timeout=5)
-        r2.raise_for_status()
-        data2 = r2.json()
-
-        pages = data2.get("query", {}).get("pages", {})
-        page = pages.get(str(pageid)) or next(iter(pages.values()), None)
+        data2 = requests.get(api, params=content_params, headers=headers, timeout=5).json()
+        pages2 = data2.get("query", {}).get("pages", {})
+        page = pages2.get(str(pageid)) or _pick_first_non_missing_page(pages2)
         if not page or "missing" in page:
             return None
 
@@ -289,15 +320,11 @@ def _scrape_wikipedia(query: str, headers: dict):
         if not revs:
             return None
 
-        # MediaWiki slots 구조
-        wikitext = revs[0].get("slots", {}).get("main", {}).get("*")
-        if not wikitext:
-            # 구형 구조 fallback
-            wikitext = revs[0].get("*")
+        wikitext = revs[0].get("slots", {}).get("main", {}).get("*") or revs[0].get("*")
         if not wikitext:
             return None
 
-        # 3) 썸네일 별도 요청(pageimages)
+        # 2) 썸네일
         img_params = {
             "action": "query",
             "format": "json",
@@ -307,29 +334,16 @@ def _scrape_wikipedia(query: str, headers: dict):
             "pithumbsize": 400,
             "redirects": 1,
         }
-        r3 = requests.get(api, params=img_params, headers=headers, timeout=5)
-        r3.raise_for_status()
-        data3 = r3.json()
+        data3 = requests.get(api, params=img_params, headers=headers, timeout=5).json()
         pages3 = data3.get("query", {}).get("pages", {})
-        page3 = pages3.get(str(pageid)) or next(iter(pages3.values()), None)
+        page3 = pages3.get(str(pageid)) or _pick_first_non_missing_page(pages3)
         img_url = (page3.get("thumbnail") or {}).get("source") if page3 else None
 
-        # 4) 작가/연도 추출
-        # 4-1) 인포박스/템플릿에서 키 기반 우선 추출
-        author = _extract_field_from_infobox(
-            wikitext,
-            keys=["작가", "저자", "원작", "글", "각본", "작화", "감독"]
-        )
+        # 3) 작가/연도(네 함수들 그대로 사용)
+        author = _extract_field_from_infobox(wikitext, keys=["작가", "저자", "원작", "글", "각본", "작화", "감독"])
+        year_raw = _extract_field_from_infobox(wikitext, keys=["연도", "출시", "발매", "개봉", "연재 시작", "연재시작", "첫 연재", "첫방송", "방영 시작"])
+        year = _extract_year_from_text(year_raw) if year_raw else None
 
-        # 4-2) 연도도 인포박스 키 우선 (있으면)
-        year = _extract_field_from_infobox(
-            wikitext,
-            keys=["연도", "출시", "발매", "개봉", "연재 시작", "연재시작", "첫 연재", "첫방송", "방영 시작"]
-        )
-        # year가 "2022년 2월 16일" 같은 형태면 4자리만 뽑기
-        year = _extract_year_from_text(year) if year else None
-
-        # 4-3) 인포박스에서 못 찾았으면 본문 텍스트로 fallback
         cleaned = _clean_wikitext_minimal(wikitext)
         if not author:
             author = _extract_author_from_text(cleaned)
@@ -344,12 +358,10 @@ def _scrape_wikipedia(query: str, headers: dict):
             "img_url": img_url,
         }
 
-    except requests.RequestException as e:
-        print(f"    ⚠️ 위키백과 요청 실패: {e}")
-        return None
     except Exception as e:
         print(f"    ⚠️ 위키백과 파싱 실패: {e}")
         return None
+
 
 def _scrape_google_search(query, content_type, headers):
     """구글 검색 결과에서 정보 추출 (최후의 수단)"""
