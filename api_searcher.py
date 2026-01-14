@@ -108,90 +108,212 @@ def _scrape_namu_wiki(query, headers):
         return None
 
 
-def _scrape_wikipedia(query, headers):
-    try:
-        api = "https://ko.wikipedia.org/w/api.php"
+def _clean_wikitext_minimal(wt: str) -> str:
+    """
+    위키텍스트에서 작가/연도 추출을 위해 최소한의 노이즈만 제거.
+    (완벽한 파서가 아니라 '추출용'으로만)
+    """
+    if not wt:
+        return ""
 
-        # 1) 검색해서 title 확보
-        search_params = {
-            'action': 'query',
-            'list': 'search',
-            'srsearch': query,
-            'format': 'json',
-            'srlimit': 1
-        }
-        r = requests.get(api, params=search_params, headers=headers, timeout=5)
-        data = r.json()
-        results = data.get('query', {}).get('search', [])
-        if not results:
-            return None
+    t = wt
 
-        title = results[0]['title']
+    # 주석 제거
+    t = re.sub(r"<!--.*?-->", " ", t, flags=re.DOTALL)
 
-        # 2) title로 본문 요약 + 썸네일 가져오기
-        page_params = {
-            'action': 'query',
-            'format': 'json',
-            'prop': 'extracts|pageimages',
-            'titles': title,
-            'exintro': 1,
-            'explaintext': 1,
-            'piprop': 'thumbnail',
-            'pithumbsize': 400
-        }
-        r2 = requests.get(api, params=page_params, headers=headers, timeout=5)
-        data2 = r2.json()
+    # ref 태그 제거
+    t = re.sub(r"<ref[^>]*>.*?</ref>", " ", t, flags=re.DOTALL)
+    t = re.sub(r"<ref[^/>]*/\s*>", " ", t)
 
-        pages = data2.get('query', {}).get('pages', {})
-        page = next(iter(pages.values()), None)
-        if not page:
-            return None
+    # 템플릿/테이블 등 너무 복잡한 것 일부 완화(과도 제거는 역효과라 최소)
+    # 링크 [[A|B]] -> B, [[A]] -> A
+    t = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", t)
+    t = re.sub(r"\[\[([^\]]+)\]\]", r"\1", t)
 
-        extract = page.get('extract', '') or ''
-        thumb = (page.get('thumbnail') or {}).get('source')
+    # 외부링크 [http://... 라벨] -> 라벨
+    t = re.sub(r"\[https?://[^\s\]]+\s+([^\]]+)\]", r"\1", t)
 
-        # 3) 요약문에서 작가/연도 추출(휴리스틱)
-        author = _extract_author_from_kowiki_extract(extract)
-        year = _extract_year_from_text(extract)
+    # 굵게/기울임 마크업 제거
+    t = t.replace("'''", "").replace("''", "")
 
-        return {
-            'title': title,
-            'author': author or "정보 없음",
-            'year': year,              # 문자열 "2022" 같은 형태
-            'img_url': thumb,
-            'source': '위키백과'
-        }
+    # 남은 태그 제거
+    t = re.sub(r"<[^>]+>", " ", t)
 
-    except Exception as e:
-        print(f"    ⚠️ 위키백과 파싱 실패: {e}")
+    # 공백 정리
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _extract_field_from_infobox(wikitext: str, keys):
+    """
+    인포박스/템플릿에서 ' | 키 = 값 ' 형태를 우선 추출.
+    keys: ['작가', '저자', ...]
+    """
+    if not wikitext:
         return None
 
-
-def _extract_author_from_kowiki_extract(text: str):
-    """
-    한국어 위키 요약문에서 흔히 나오는 패턴:
-    - '...는 OOO가 ...' / '...는 OOO의 ...' / '...는 OOO이 ...'
-    """
-    t = " ".join(text.split())
-    patterns = [
-        r'([가-힣A-Za-z·\s]+?)가\s+(?:쓰고\s+그린|그린|쓴)\s+(?:일본\s+)?(?:만화|소설|작품)',
-        r'([가-힣A-Za-z·\s]+?)의\s+(?:일본\s+)?(?:만화|소설|작품)',
-        r'원작[:\s]*([가-힣A-Za-z·\s]+)',
-        r'작가[:\s]*([가-힣A-Za-z·\s]+)',
-        r'글[:\s]*([가-힣A-Za-z·\s]+)',
-        r'그림[:\s]*([가-힣A-Za-z·\s]+)',
-    ]
-    for p in patterns:
-        m = re.search(p, t)
+    # 인포박스가 명시된 경우가 많지만 템플릿 이름이 다양해서 '키=' 라인을 직접 찾는 방식
+    # 예: | 작가 = 우라나 케이
+    #     | 저자 = ...
+    for k in keys:
+        # 줄 단위에서 안정적으로 찾기 위해 line anchor 사용
+        m = re.search(rf"(?m)^\s*\|\s*{re.escape(k)}\s*=\s*(.+?)\s*$", wikitext)
         if m:
-            return m.group(1).strip()
+            value = m.group(1).strip()
+            # 값 끝에 주석/템플릿/ref 등이 붙을 수 있으니 간단히 컷
+            value = re.split(r"<ref|{{|}}|\[\[분류:|\[\[Category:", value)[0].strip()
+            # 링크 [[A|B]] 같은 경우는 최소 치환
+            value = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", value)
+            value = re.sub(r"\[\[([^\]]+)\]\]", r"\1", value)
+            return value[:80]
     return None
 
 
 def _extract_year_from_text(text: str):
-    # 가장 먼저 등장하는 4자리 연도(2000~2099) 추출
-    m = re.search(r'\b(20\d{2})\b', text)
+    if not text:
+        return None
+    m = re.search(r"(20\d{2})\s*년?", text)
     return m.group(1) if m else None
+
+
+def _extract_author_from_text(text: str):
+    """
+    인포박스에서 못 찾았을 때 본문 텍스트에서 휴리스틱 추출
+    """
+    if not text:
+        return None
+
+    t = " ".join(text.split())
+
+    patterns = [
+        r'([가-힣A-Za-z·\s]+?)가\s+(?:쓰고\s+그린|그린|쓴)\s+(?:일본\s+)?(?:만화|소설|작품)',
+        r'([가-힣A-Za-z·\s]+?)의\s+(?:일본\s+)?(?:만화|소설|작품)',
+        r'(?:작가|저자|원작|글|각본|작화|감독)\s*[:：]\s*([가-힣A-Za-z·\s]+)',
+        r'(?:작가|저자|원작|글|각본|작화|감독)\s+([가-힣A-Za-z·\s]+)',
+    ]
+    for p in patterns:
+        m = re.search(p, t)
+        if m:
+            return m.group(1).strip()[:60]
+    return None
+
+
+def _scrape_wikipedia(query: str, headers: dict):
+    """
+    위키백과(ko)에서:
+      1) search로 pageid/title 확보
+      2) pageid로 revisions(content) = 통짜 위키텍스트 가져오기 (extracts 미사용)
+      3) pageimages로 썸네일 가져오기
+      4) 위키텍스트 기반으로 작가/연도 추출
+    """
+    try:
+        api = "https://ko.wikipedia.org/w/api.php"
+
+        # 1) 검색 -> pageid/title
+        search_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "format": "json",
+            "srlimit": 1,
+        }
+        r = requests.get(api, params=search_params, headers=headers, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+
+        results = data.get("query", {}).get("search", [])
+        if not results:
+            return None
+
+        title = results[0].get("title")
+        pageid = results[0].get("pageid")
+        if not title or not pageid:
+            return None
+
+        # 2) 통짜 위키텍스트 가져오기
+        content_params = {
+            "action": "query",
+            "format": "json",
+            "pageids": pageid,
+            "prop": "revisions",
+            "rvslots": "main",
+            "rvprop": "content",
+            "redirects": 1,
+        }
+        r2 = requests.get(api, params=content_params, headers=headers, timeout=5)
+        r2.raise_for_status()
+        data2 = r2.json()
+
+        pages = data2.get("query", {}).get("pages", {})
+        page = pages.get(str(pageid)) or next(iter(pages.values()), None)
+        if not page or "missing" in page:
+            return None
+
+        revs = page.get("revisions", [])
+        if not revs:
+            return None
+
+        # MediaWiki slots 구조
+        wikitext = revs[0].get("slots", {}).get("main", {}).get("*")
+        if not wikitext:
+            # 구형 구조 fallback
+            wikitext = revs[0].get("*")
+        if not wikitext:
+            return None
+
+        # 3) 썸네일 별도 요청(pageimages)
+        img_params = {
+            "action": "query",
+            "format": "json",
+            "pageids": pageid,
+            "prop": "pageimages",
+            "piprop": "thumbnail",
+            "pithumbsize": 400,
+            "redirects": 1,
+        }
+        r3 = requests.get(api, params=img_params, headers=headers, timeout=5)
+        r3.raise_for_status()
+        data3 = r3.json()
+        pages3 = data3.get("query", {}).get("pages", {})
+        page3 = pages3.get(str(pageid)) or next(iter(pages3.values()), None)
+        img_url = (page3.get("thumbnail") or {}).get("source") if page3 else None
+
+        # 4) 작가/연도 추출
+        # 4-1) 인포박스/템플릿에서 키 기반 우선 추출
+        author = _extract_field_from_infobox(
+            wikitext,
+            keys=["작가", "저자", "원작", "글", "각본", "작화", "감독"]
+        )
+
+        # 4-2) 연도도 인포박스 키 우선 (있으면)
+        year = _extract_field_from_infobox(
+            wikitext,
+            keys=["연도", "출시", "발매", "개봉", "연재 시작", "연재시작", "첫 연재", "첫방송", "방영 시작"]
+        )
+        # year가 "2022년 2월 16일" 같은 형태면 4자리만 뽑기
+        year = _extract_year_from_text(year) if year else None
+
+        # 4-3) 인포박스에서 못 찾았으면 본문 텍스트로 fallback
+        cleaned = _clean_wikitext_minimal(wikitext)
+        if not author:
+            author = _extract_author_from_text(cleaned)
+        if not year:
+            year = _extract_year_from_text(cleaned)
+
+        return {
+            "title": title,
+            "pageid": pageid,
+            "author": author or "정보 없음",
+            "year": year,
+            "img_url": img_url,
+        }
+
+    except requests.RequestException as e:
+        print(f"    ⚠️ 위키백과 요청 실패: {e}")
+        return None
+    except Exception as e:
+        print(f"    ⚠️ 위키백과 파싱 실패: {e}")
+        return None
 
 def _scrape_google_search(query, content_type, headers):
     """구글 검색 결과에서 정보 추출 (최후의 수단)"""
@@ -452,7 +574,7 @@ class ContentSearcher:
             print(f"🔍 Google에서 추출한 정보 - 제목: {google_info['title']}, 작가: {google_info.get('author')}")
             # 이미지는 원래 MangaDex 결과가 있으면 사용, 없으면 None
             img_url = result[3] if result else None
-            return google_info['title'], google_info.get('year'), google_info.get('author'), img_url
+            return google_info['title'], google_info.get('year') or result[1], google_info.get('author') or result[2], img_url or result[3]
 
         print(f"❌ MangaDex/Google: No results for '{original_name}'")
         return None, None, None, None
