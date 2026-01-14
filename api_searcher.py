@@ -100,6 +100,7 @@ def _scrape_namu_wiki(query, headers):
 
         html = response.text
         if _is_blocked_or_challenge(html):
+            print("아 막혀버림 나무위키가 막았어요")
             # 여기서 title 못뽑는 게 정상임(문서 HTML이 아님)
             return None
 
