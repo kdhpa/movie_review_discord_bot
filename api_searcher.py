@@ -55,6 +55,7 @@ def _extract_namu_title(soup: BeautifulSoup, html: str) -> str | None:
 async def scrape_google_search_info(query, content_type="만화"):
     """검색 결과에서 제목, 작가 정보 추출 (나무위키 → 위키백과 → 구글 순서)"""
     try:
+        print(f"[DEBUG] scrape_google_search_info() 시작 - query: {query}, content_type: {content_type}")
         await asyncio.sleep(1)  # rate limit 방지
         loop = asyncio.get_event_loop()
 
@@ -64,17 +65,22 @@ async def scrape_google_search_info(query, content_type="만화"):
             }
 
             # 1차 시도: 나무위키 직접 접근 (가장 빠름)
-            print(f"  [1] 나무위키에서 '{query}' 검색 중...")
+            print(f"[DEBUG] [1차] 나무위키에서 '{query}' 검색 시작...")
             namu_result = _scrape_namu_wiki(query, headers)
             if namu_result:
+                print(f"[DEBUG] [1차] 나무위키 성공: {namu_result}")
                 return namu_result
+            print(f"[DEBUG] [1차] 나무위키 실패")
 
             # 2차 시도: 위키백과 API
-            print(f"  [2] 위키백과에서 '{query}' 검색 중...")
+            print(f"[DEBUG] [2차] 위키백과에서 '{query}' 검색 시작...")
             wiki_result = _scrape_wikipedia(query, headers)
             if wiki_result:
+                print(f"[DEBUG] [2차] 위키백과 성공: {wiki_result}")
                 return wiki_result
+            print(f"[DEBUG] [2차] 위키백과 실패")
 
+            print(f"[DEBUG] scrape_google_search_info() 반환값 None")
             return None
 
         result = await loop.run_in_executor(None, _scrape)
@@ -90,24 +96,30 @@ def _scrape_namu_wiki(query, headers):
         # 공백/특수문자 안전하게 인코딩
         safe_query = quote(query, safe="")
         url = f"https://namu.wiki/w/{safe_query}"
+        print(f"[DEBUG] _scrape_namu_wiki() URL: {url}")
 
         response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        print(f"[DEBUG] _scrape_namu_wiki() 응답 상태: {response.status_code}")
 
         if response.status_code == 404:
+            print(f"[DEBUG] _scrape_namu_wiki() 404 Not Found")
             return None
         if response.status_code != 200:
+            print(f"[DEBUG] _scrape_namu_wiki() 상태 오류: {response.status_code}")
             return None
 
         html = response.text
         if _is_blocked_or_challenge(html):
-            print("아 막혀버림 나무위키가 막았어요")
+            print("[DEBUG] _scrape_namu_wiki() Cloudflare/봇 차단 감지")
             # 여기서 title 못뽑는 게 정상임(문서 HTML이 아님)
             return None
 
         soup = BeautifulSoup(html, "html.parser")
 
         title = _extract_namu_title(soup, html)
+        print(f"[DEBUG] _scrape_namu_wiki() 제목 추출: {title}")
         if not title:
+            print(f"[DEBUG] _scrape_namu_wiki() 제목 추출 실패")
             return None
 
         # 작가/저자: 테이블 클래스가 계속 바뀌어서 여러 후보로
@@ -130,25 +142,32 @@ def _scrape_namu_wiki(query, headers):
 
                     if any(k in label for k in ["작가", "저자", "원작", "작화", "각본", "감독"]):
                         author = value
+                        print(f"[DEBUG] _scrape_namu_wiki() 작가 추출: {author}")
                         break
+
+        if not author:
+            print(f"[DEBUG] _scrape_namu_wiki() 작가 못 찾음")
 
         # 연도: 본문 전체에서 첫 20xx 찾기(너무 잘못 잡히면 인포박스 쪽으로 제한 가능)
         year_match = re.search(r"(20\d{2})", html)
         if year_match:
             year = year_match.group(1)
+            print(f"[DEBUG] _scrape_namu_wiki() 연도 추출: {year}")
+        else:
+            print(f"[DEBUG] _scrape_namu_wiki() 연도 못 찾음")
 
-        print("NAMU:", title, author, year)
-
-        return {
+        result = {
             "title": title,
             "author": author or "정보 없음",
             "year": year,
             "img_url": None,
             "source": "나무위키",
         }
+        print(f"[DEBUG] _scrape_namu_wiki() 완료 - 반환: {result}")
+        return result
 
     except Exception as e:
-        print(f"    ⚠️ 나무위키 파싱 실패: {e}")
+        print(f"[ERROR] _scrape_namu_wiki() 실패: {e}")
         return None
 
 
@@ -268,13 +287,16 @@ def _resolve_exact_title(api: str, query: str, headers: dict):
 
 def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = False):
     try:
+        print(f"[DEBUG] _scrape_wikipedia() 시작 - query: {query}")
         api = "https://ko.wikipedia.org/w/api.php"
 
         # 0) 정확 제목(또는 리다이렉트) 먼저 확인
         resolved = _resolve_exact_title(api, query, headers)
         if resolved:
             title, pageid = resolved
+            print(f"[DEBUG] _scrape_wikipedia() 정확 제목 찾음: title={title}, pageid={pageid}")
         else:
+            print(f"[DEBUG] _scrape_wikipedia() 정확 제목 못 찾음, allow_search_fallback={allow_search_fallback}")
             if not allow_search_fallback:
                 return None
 
@@ -289,16 +311,21 @@ def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = F
             data = requests.get(api, params=search_params, headers=headers, timeout=5).json()
             results = data.get("query", {}).get("search", [])
             if not results:
+                print(f"[DEBUG] _scrape_wikipedia() 검색 결과 없음")
                 return None
 
             title = results[0].get("title")
             pageid = results[0].get("pageid")
             if not title or not pageid:
+                print(f"[DEBUG] _scrape_wikipedia() title/pageid 없음")
                 return None
 
             # 너무 엉뚱한 문서 컷(원하면 완화 가능)
             if _normalize_key(title) != _normalize_key(query):
+                print(f"[DEBUG] _scrape_wikipedia() 다른 문서 감지: {title}")
                 return None
+
+            print(f"[DEBUG] _scrape_wikipedia() 검색 결과: title={title}, pageid={pageid}")
 
         # 1) 통짜 위키텍스트
         content_params = {
@@ -322,7 +349,9 @@ def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = F
 
         wikitext = revs[0].get("slots", {}).get("main", {}).get("*") or revs[0].get("*")
         if not wikitext:
+            print(f"[DEBUG] _scrape_wikipedia() 위키텍스트 추출 실패")
             return None
+        print(f"[DEBUG] _scrape_wikipedia() 위키텍스트 추출 성공 (길이: {len(wikitext)})")
 
         # 2) 썸네일
         img_params = {
@@ -338,6 +367,7 @@ def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = F
         pages3 = data3.get("query", {}).get("pages", {})
         page3 = pages3.get(str(pageid)) or _pick_first_non_missing_page(pages3)
         img_url = (page3.get("thumbnail") or {}).get("source") if page3 else None
+        print(f"[DEBUG] _scrape_wikipedia() 썸네일 URL: {img_url}")
 
         # 3) 작가/연도(네 함수들 그대로 사용)
         author = _extract_field_from_infobox(wikitext, keys=["작가", "저자", "원작", "글", "각본", "작화", "감독"])
@@ -350,13 +380,18 @@ def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = F
         if not year:
             year = _extract_year_from_text(cleaned)
 
-        return {
+        print(f"[DEBUG] _scrape_wikipedia() 작가 추출: {author}")
+        print(f"[DEBUG] _scrape_wikipedia() 연도 추출: {year}")
+
+        result = {
             "title": title,
             "pageid": pageid,
             "author": author or "정보 없음",
             "year": year,
             "img_url": img_url,
         }
+        print(f"[DEBUG] _scrape_wikipedia() 완료 - 반환: {result}")
+        return result
 
     except Exception as e:
         print(f"    ⚠️ 위키백과 파싱 실패: {e}")
@@ -366,48 +401,59 @@ def _scrape_wikipedia(query: str, headers: dict, allow_search_fallback: bool = F
 def _scrape_google_search(query, content_type, headers):
     """구글 검색 결과에서 정보 추출 (최후의 수단)"""
     try:
+        print(f"[DEBUG] _scrape_google_search() 시작 - query: {query}, content_type: {content_type}")
         search_url = f"https://www.google.com/search?q={query}+{content_type}&hl=ko"
+        print(f"[DEBUG] _scrape_google_search() 검색 URL: {search_url}")
         response = requests.get(search_url, headers=headers, timeout=5)
+        print(f"[DEBUG] _scrape_google_search() 응답 상태: {response.status_code}")
 
         if response.status_code != 200:
+            print(f"[DEBUG] _scrape_google_search() 상태 오류: {response.status_code}")
             return None
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # 검색 결과 snippet에서 첫 번째 결과 찾기
         search_results = soup.find_all('div', {'class': 'g'})
+        print(f"[DEBUG] _scrape_google_search() 검색 결과 개수: {len(search_results)}")
 
-        for result in search_results:
+        for idx, result in enumerate(search_results):
             # 제목 찾기
             title_elem = result.find('h3')
             if not title_elem:
                 continue
 
             title = title_elem.get_text(strip=True)
+            print(f"[DEBUG] _scrape_google_search() [{idx}] 제목 추출: {title}")
 
             # snippet에서 추가 정보 추출
             snippet_elem = result.find('div', {'style': '-webkit-line-clamp:2'})
             snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+            print(f"[DEBUG] _scrape_google_search() [{idx}] snippet: {snippet[:100]}...")
 
             # 작가 정보 추출 시도
             author = None
             if '작가' in snippet or '저자' in snippet:
                 parts = snippet.split('작가')[-1] if '작가' in snippet else snippet.split('저자')[-1]
                 author = parts.split(',')[0].strip()[:50]
+                print(f"[DEBUG] _scrape_google_search() [{idx}] 작가 추출: {author}")
 
             if title:  # 제목이 있으면 반환
-                return {
+                result_dict = {
                     'title': title,
                     'author': author or "정보 없음",
                     'year': None,
                     'img_url': None,
                     'source': '구글 검색'
                 }
+                print(f"[DEBUG] _scrape_google_search() 완료 - 반환: {result_dict}")
+                return result_dict
 
+        print(f"[DEBUG] _scrape_google_search() 반환값 없음")
         return None
 
     except Exception as e:
-        print(f"    ⚠️ 구글 검색 파싱 실패: {e}")
+        print(f"[ERROR] _scrape_google_search() 실패: {e}")
         return None
 
 async def is_korean(text):
@@ -512,29 +558,43 @@ class ContentSearcher:
     @staticmethod
     async def search_tmdb(session, name):
         """TMDB multi search API로 영화/드라마/애니 검색 및 자동 분류 (Google fallback 포함)"""
+        print(f"[DEBUG] search_tmdb() 시작 - name: {name}")
+
         # 1차: 직접 검색
+        print(f"[DEBUG] search_tmdb() [1차] TMDB 직접 검색 시도...")
         result = await ContentSearcher._search_tmdb_direct(session, name)
 
         # 검색 성공 시 반환
         if result[0] is not None:
+            print(f"[DEBUG] search_tmdb() [1차] 성공 - 반환: title={result[0]}, year={result[1]}, director={result[2]}, category={result[4]}")
             return result
 
+        print(f"[DEBUG] search_tmdb() [1차] 실패")
+
         # 2차: Google 스크래핑으로 정보 추출
-        print(f"🔍 TMDB 직접 검색 실패, Google 스크래핑 시도: {name}")
+        print(f"[DEBUG] search_tmdb() [2차] Google 스크래핑 시도...")
         google_info = await scrape_google_search_info(name, "영화")
 
         if google_info and google_info.get('title'):
-            print(f"🔍 Google에서 추출한 정보 - 제목: {google_info['title']}, 감독: {google_info.get('author')}")
+            print(f"[DEBUG] search_tmdb() [2차] 성공 - 제목: {google_info['title']}, 감독: {google_info.get('author')}")
             return google_info['title'], google_info.get('year'), google_info.get('author'), None, 'movie'
 
+        print(f"[DEBUG] search_tmdb() [2차] 실패")
+
         # 3차: 번역 후 재검색
+        print(f"[DEBUG] search_tmdb() [3차] 영문 번역 시도...")
         translated = await translate_to_english(name)
         if translated and translated != name:
-            print(f"🔍 번역된 제목으로 TMDB 재검색: {translated}")
+            print(f"[DEBUG] search_tmdb() [3차] 번역 성공: {translated} -> TMDB 재검색...")
             result = await ContentSearcher._search_tmdb_direct(session, translated)
             if result[0] is not None:
+                print(f"[DEBUG] search_tmdb() [3차] 성공 - 반환: title={result[0]}, year={result[1]}, director={result[2]}, category={result[4]}")
                 return result
+            print(f"[DEBUG] search_tmdb() [3차] TMDB 재검색 실패")
+        else:
+            print(f"[DEBUG] search_tmdb() [3차] 번역 실패 또는 동일: {translated}")
 
+        print(f"[DEBUG] search_tmdb() 완료 - 반환값 없음")
         return None, None, None, None, None
 
     @staticmethod
@@ -591,8 +651,9 @@ class ContentSearcher:
                         if filename:
                             manga_id = manga.get('id')
                             img_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
+                            print(f"이미지 정보: {img_url}")
                         break
-
+                print(f"망가덱스에서 가져온 정보 - 제목: {title}, 년도: {year}, 작가: {author}")
                 return title, year, author, img_url
 
         except Exception as e:
@@ -603,70 +664,100 @@ class ContentSearcher:
     @staticmethod
     async def search_manga(session, name):
         """MangaDex에서 만화 검색 (한국어 제목 없으면 Google 스크래핑)"""
+        print(f"[DEBUG] search_manga() 시작 - name: {name}")
         original_name = name
 
         # 1차: 영어로 번역 후 검색
+        print(f"[DEBUG] search_manga() [1차] 영문 번역 시도...")
         translated_name = await translate_to_english(name)
+        print(f"[DEBUG] search_manga() [1차] 번역됨: {translated_name}")
         result = await ContentSearcher._search_manga_direct(session, translated_name)
+        print(f"[DEBUG] search_manga() [1차] MangaDex 검색 결과: {result}")
 
         # 한국어 제목이 있으면 반환
         if result[0] is not None and await is_korean(result[0]):
+            print(f"[DEBUG] search_manga() [1차] 한국어 제목 발견 - 반환: title={result[0]}, year={result[1]}, author={result[2]}")
             return result
 
-        # 3차: Google 스크래핑으로 정보 추출
-        print(f"🔍 MangaDex에서 한국어 제목 못 찾음, Google 스크래핑 시도: {original_name}")
+        print(f"[DEBUG] search_manga() [1차] 한국어 제목 없음")
+
+        # 2차: Google 스크래핑으로 정보 추출
+        print(f"[DEBUG] search_manga() [2차] Google 스크래핑 시도...")
         google_info = await scrape_google_search_info(original_name, "만화")
 
         if google_info and google_info.get('title'):
-            print(f"🔍 Google에서 추출한 정보 - 제목: {google_info['title']}, 작가: {google_info.get('author')}")
+            print(f"[DEBUG] search_manga() [2차] 성공 - 제목: {google_info['title']}, 작가: {google_info.get('author')}")
             # 이미지는 원래 MangaDex 결과가 있으면 사용, 없으면 None
-            img_url = result[3] if result else None
-            return google_info['title'], google_info.get('year') or result[1], google_info.get('author') or result[2], img_url or result[3]
+            img_url = result[3] if result and len(result) > 3 else None
+            print(f"[DEBUG] search_manga() [2차] 이미지 URL: {img_url or google_info.get('img_url')}")
+            year = google_info.get('year') or (result[1] if result and len(result) > 1 else None)
+            author = google_info.get('author') or (result[2] if result and len(result) > 2 else None)
+            final_result = (google_info['title'], year, author, (img_url or google_info.get('img_url')))
+            print(f"[DEBUG] search_manga() 완료 - 반환: {final_result}")
+            return final_result
 
-        print(f"❌ MangaDex/Google: No results for '{original_name}'")
+        print(f"[DEBUG] search_manga() [2차] 실패")
+        print(f"[DEBUG] search_manga() 완료 - 반환값 없음")
         return None, None, None, None
 
     @staticmethod
     async def _search_naver_webtoon(session, name):
         """네이버 웹툰에서 직접 검색 (내부용)"""
+        print(f"[DEBUG] _search_naver_webtoon() 시작 - name: {name}")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
 
         try:
             search_url = f"https://comic.naver.com/api/search/all?keyword={name}"
+            print(f"[DEBUG] _search_naver_webtoon() 검색 URL: {search_url}")
             async with session.get(search_url, headers=headers) as response:
+                print(f"[DEBUG] _search_naver_webtoon() 응답 상태: {response.status}")
                 if response.status == 200:
                     data = await response.json()
                     webtoons = data.get('searchWebtoonResult', {}).get('searchViewList', [])
+                    print(f"[DEBUG] _search_naver_webtoon() 검색 결과 개수: {len(webtoons)}")
 
                     if webtoons:
                         webtoon = webtoons[0]
                         title = webtoon.get('titleName', name)
                         author = webtoon.get('displayAuthor')
                         img_url = webtoon.get('thumbnailUrl')
+                        print(f"[DEBUG] _search_naver_webtoon() 완료 - title: {title}, author: {author}")
 
                         return title, "네이버웹툰", author, img_url
+                else:
+                    print(f"[DEBUG] _search_naver_webtoon() 상태 오류: {response.status}")
         except Exception as e:
-            print(f"⚠️ Naver webtoon search failed: {e}")
+            print(f"[ERROR] _search_naver_webtoon() 실패: {e}")
 
+        print(f"[DEBUG] _search_naver_webtoon() 반환값 없음")
         return None, None, None, None
 
     @staticmethod
     async def search_webtoon(session, name):
         """웹툰 검색 (네이버 → 카카오 → Google 스크래핑)"""
+        print(f"[DEBUG] search_webtoon() 시작 - name: {name}")
+
         # 1차: 네이버 웹툰 검색
+        print(f"[DEBUG] search_webtoon() [1차] 네이버 웹툰 검색...")
         result = await ContentSearcher._search_naver_webtoon(session, name)
         if result[0] is not None:
+            print(f"[DEBUG] search_webtoon() [1차] 성공 - 반환: {result}")
             return result
 
-        # 3차: Google 스크래핑으로 웹툰 정보 추출
-        print(f"🔍 웹툰 직접 검색 실패, Google 스크래핑 시도: {name}")
+        print(f"[DEBUG] search_webtoon() [1차] 실패")
+
+        # 2차: Google 스크래핑으로 웹툰 정보 추출
+        print(f"[DEBUG] search_webtoon() [2차] Google 스크래핑 시도...")
         google_info = await scrape_google_search_info(name, "웹툰")
 
         if google_info and google_info.get('title'):
-            print(f"🔍 Google에서 추출한 정보 - 제목: {google_info['title']}, 작가: {google_info.get('author')}")
-            return google_info['title'], "Google 검색", google_info.get('author'), None
+            print(f"[DEBUG] search_webtoon() [2차] 성공 - 제목: {google_info['title']}, 작가: {google_info.get('author')}")
+            final_result = (google_info['title'], "Google 검색", google_info.get('author'), None)
+            print(f"[DEBUG] search_webtoon() 완료 - 반환: {final_result}")
+            return final_result
 
-        print(f"❌ Webtoon: No results for '{name}'")
+        print(f"[DEBUG] search_webtoon() [2차] 실패")
+        print(f"[DEBUG] search_webtoon() 완료 - 반환값 없음")
         return None, None, None, None

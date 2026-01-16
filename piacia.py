@@ -51,10 +51,13 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
 
     async def on_submit(self, interaction: discord.Interaction):
+        print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}")
         title = self.children[0].value
         score = self.children[1].value
         line_comment = self.children[2].value
         comment = self.children[3].value
+
+        print(f"[DEBUG] ReviewForm.on_submit() 입력값 - title: {title}, score: {score}")
 
         try:
             score_float = float(score)
@@ -71,6 +74,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
 
         async with aiohttp.ClientSession() as session:
             # 카테고리별 검색
+            print(f"[DEBUG] ReviewForm.on_submit() 검색 시작 - 카테고리: {self.category}")
             if self.category == 'tmdb':
                 title, year, director, img_url, db_category = await ContentSearcher.search_tmdb(session, title)
             elif self.category == 'manga':
@@ -80,17 +84,23 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 title, year, director, img_url = await ContentSearcher.search_webtoon(session, title)
                 db_category = 'webtoon'
 
+            print(f"[DEBUG] ReviewForm.on_submit() 검색 결과 - title: {title}, year: {year}, director: {director}, img_url: {img_url}")
+
             # 검색 결과 없음 확인 (title, year, director 중 하나라도 N/A면 실패)
             if title == None or director == None or year == None:
+                print(f"[DEBUG] ReviewForm.on_submit() 검색 실패 - 결과 없음")
                 await interaction.followup.send(f"❌ '{original_title}'를 찾을 수 없습니다. 정확한 제목으로 다시 시도해주세요.", ephemeral=True)
                 return
 
             # 중복 확인
+            print(f"[DEBUG] ReviewForm.on_submit() 중복 확인 중...")
             if self.db.has_review(interaction.user.id, title, db_category):
+                print(f"[DEBUG] ReviewForm.on_submit() 중복 발견")
                 await interaction.followup.send(f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.", ephemeral=True)
                 return
 
             # DB 저장
+            print(f"[DEBUG] ReviewForm.on_submit() DB 저장 중...")
             self.db.save_review(
                 user_id=interaction.user.id,
                 username=str(interaction.user),
@@ -102,6 +112,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 additional_comment=comment,
                 category=db_category
             )
+            print(f"[DEBUG] ReviewForm.on_submit() DB 저장 완료")
 
             # 카테고리별 출력 형식
             emoji = CATEGORY_EMOJI.get(db_category, "🎬")
@@ -137,14 +148,26 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
             if comment:
                 filled_form += f"\n\n📝추가 코멘트 : {comment}"
 
+            print(f"[DEBUG] ReviewForm.on_submit() 이미지 처리 - img_url: {img_url}")
             if img_url:
-                async with session.get(img_url) as img_response:
-                    if img_response.status == 200:
-                        file = discord.File(io.BytesIO(await img_response.read()), filename="image.jpg")
-                        await interaction.followup.send(filled_form, file=file)
-                    else:
-                        await interaction.followup.send(filled_form)
+                print(f"[DEBUG] ReviewForm.on_submit() 이미지 다운로드 시작 - URL: {img_url}")
+                try:
+                    async with session.get(img_url) as img_response:
+                        print(f"[DEBUG] ReviewForm.on_submit() 이미지 응답 상태: {img_response.status}")
+                        if img_response.status == 200:
+                            img_data = await img_response.read()
+                            print(f"[DEBUG] ReviewForm.on_submit() 이미지 다운로드 성공 (크기: {len(img_data)} bytes)")
+                            file = discord.File(io.BytesIO(img_data), filename="image.jpg")
+                            await interaction.followup.send(filled_form, file=file)
+                            print(f"[DEBUG] ReviewForm.on_submit() 이미지 포함 메시지 전송 완료")
+                        else:
+                            print(f"[DEBUG] ReviewForm.on_submit() 이미지 다운로드 실패 (상태: {img_response.status}), 텍스트만 전송")
+                            await interaction.followup.send(filled_form)
+                except Exception as e:
+                    print(f"[ERROR] ReviewForm.on_submit() 이미지 다운로드 중 오류: {e}")
+                    await interaction.followup.send(filled_form)
             else:
+                print(f"[DEBUG] ReviewForm.on_submit() img_url 없음, 텍스트만 전송")
                 await interaction.followup.send(filled_form)
 
 
