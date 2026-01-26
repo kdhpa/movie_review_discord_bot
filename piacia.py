@@ -47,7 +47,8 @@ async def _save_and_send_review(
     line_comment: str,
     comment: str,
     author_id: int,
-    author_name: str
+    author_name: str,
+    display_name: str
 ):
     """리뷰 저장 및 메시지 전송 (공통 로직)"""
     print(f"[DEBUG] _save_and_send_review() 시작 - 작성자: {author_name}")
@@ -94,7 +95,7 @@ async def _save_and_send_review(
             year=year,
             score=return_score_emoji(score_float),
             one_line_text=line_comment,
-            author_name = author_name
+            author_name = display_name
         )
         filled_form = filled_form.replace("🎬", emoji)
         filled_form += f"\n🏷️ 카테고리: {cat_name}"
@@ -105,7 +106,7 @@ async def _save_and_send_review(
             year=year,
             score=return_score_emoji(score_float),
             one_line_text=line_comment,
-            author_name = author_name
+            author_name = display_name
         )
     else:  # webtoon
         filled_form = WEBTOON_FORM.format(
@@ -114,7 +115,7 @@ async def _save_and_send_review(
             author=director,
             score=return_score_emoji(score_float),
             one_line_text=line_comment,
-            author_name = author_name
+            author_name = display_name
         )
 
     if comment:
@@ -122,26 +123,35 @@ async def _save_and_send_review(
 
     # 이미지 다운로드 및 전송
     print(f"[DEBUG] _save_and_send_review() 이미지 처리 - img_url: {img_url}")
+    img_data = None
+
     if img_url:
         print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 시작 - URL: {img_url}")
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(img_url) as img_response:
-                    print(f"[DEBUG] _save_and_send_review() 이미지 응답 상태: {img_response.status}")
-                    if img_response.status == 200:
-                        img_data = await img_response.read()
-                        print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 성공 (크기: {len(img_data)} bytes)")
-                        file = discord.File(io.BytesIO(img_data), filename="image.jpg")
-                        await interaction.followup.send(filled_form, file=file)
-                        print(f"[DEBUG] _save_and_send_review() 이미지 포함 메시지 전송 완료")
-                    else:
-                        print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 실패 (상태: {img_response.status}), 텍스트만 전송")
-                        await interaction.followup.send(filled_form)
-        except Exception as e:
-            print(f"[ERROR] _save_and_send_review() 이미지 다운로드 중 오류: {e}")
-            await interaction.followup.send(filled_form)
+        timeout = aiohttp.ClientTimeout(total=30)
+
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(img_url) as img_response:
+                        print(f"[DEBUG] _save_and_send_review() 이미지 응답 상태: {img_response.status} (시도 {attempt + 1})")
+                        if img_response.status == 200:
+                            img_data = await img_response.read()
+                            print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 성공 (크기: {len(img_data)} bytes)")
+                            break
+                        else:
+                            print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 실패 (상태: {img_response.status})")
+            except Exception as e:
+                print(f"[ERROR] _save_and_send_review() 이미지 다운로드 중 오류 (시도 {attempt + 1}): {e}")
+
+            if attempt < 2:
+                await asyncio.sleep(1)
+
+    if img_data:
+        file = discord.File(io.BytesIO(img_data), filename="image.jpg")
+        await interaction.followup.send(filled_form, file=file)
+        print(f"[DEBUG] _save_and_send_review() 이미지 포함 메시지 전송 완료")
     else:
-        print(f"[DEBUG] _save_and_send_review() img_url 없음, 텍스트만 전송")
+        print(f"[DEBUG] _save_and_send_review() 이미지 없이 텍스트만 전송")
         await interaction.followup.send(filled_form)
 
     print(f"[DEBUG] _save_and_send_review() 완료")
@@ -201,7 +211,8 @@ class MovieSelectMenu(discord.ui.Select):
             self.form.line_comment,
             self.form.comment,
             self.form.author_id,
-            self.form.author_name
+            self.form.author_name,
+            self.form.display_name
         )
 
         print(f"[DEBUG] MovieSelectMenu.callback() 완료")
@@ -223,12 +234,13 @@ class MovieSelectView(discord.ui.View):
 
 
 class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
-    def __init__(self, db, category, author_id: int, author_name: str):
+    def __init__(self, db, category, author_id: int, id_name: str,author_name: str):
         super().__init__()
         self.db = db
         self.category = category  # 'tmdb', 'manga', 'webtoon'
         # 작성자 정보 (생성 시 저장)
-        self.author_name = author_name
+        self.display_name = author_name
+        self.author_name = id_name
         self.author_id = author_id
         # 리뷰 데이터 (on_submit에서 저장)
         self.score = None
@@ -296,7 +308,8 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                         self.line_comment,
                         self.comment,
                         self.author_id,
-                        self.author_name
+                        self.author_name,
+                        self.display_name
                     )
                     return
 
@@ -345,7 +358,8 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 self.line_comment,
                 self.comment,
                 self.author_id,
-                self.author_name
+                self.author_name,
+                self.display_name
             )
 
 
