@@ -380,7 +380,7 @@ bot = MyBot(command_prefix="/", intents=discord.Intents.default())
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
 ])
 async def review_command(interaction: discord.Interaction, 카테고리: str):
-    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, str(interaction.user))
+    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, interaction.user.display_name)
     await interaction.response.send_modal(modal)
 
 
@@ -467,6 +467,8 @@ async def stats_command(interaction: discord.Interaction, 제목: str, 카테고
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
 ])
 async def delete_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None):
+    await interaction.response.defer(ephemeral=True)
+
     deleted = bot.db.delete_review(interaction.user.id, 제목, 카테고리)
 
     if deleted:
@@ -486,11 +488,11 @@ async def delete_review_command(interaction: discord.Interaction, 제목: str, �
                             break
 
         if deleted_count > 0:
-            await interaction.response.send_message(f"✅ '{제목}'{cat_text} 리뷰가 삭제되었습니다. (메시지 {deleted_count}개 삭제)", ephemeral=True)
+            await interaction.followup.send(f"✅ '{제목}'{cat_text} 리뷰가 삭제되었습니다. (메시지 {deleted_count}개 삭제)")
         else:
-            await interaction.response.send_message(f"✅ '{제목}'{cat_text} 리뷰가 DB에서 삭제되었습니다.", ephemeral=True)
+            await interaction.followup.send(f"✅ '{제목}'{cat_text} 리뷰가 DB에서 삭제되었습니다.")
     else:
-        await interaction.response.send_message(f"❌ '{제목}' 리뷰를 찾을 수 없습니다.", ephemeral=True)
+        await interaction.followup.send(f"❌ '{제목}' 리뷰를 찾을 수 없습니다.")
 
 
 bot.run(Token)
