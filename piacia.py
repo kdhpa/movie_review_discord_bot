@@ -196,6 +196,8 @@ class MovieSelectMenu(discord.ui.Select):
 
         print(f"[DEBUG] MovieSelectMenu.callback() 선택됨 - title: {movie['title']}, idx: {selected_idx}")
 
+        await interaction.response.defer()
+
         # 감독 정보 지연 로딩
         if not movie.get('director'):
             print(f"[DEBUG] MovieSelectMenu.callback() 감독 정보 로딩 중...")
@@ -213,7 +215,7 @@ class MovieSelectMenu(discord.ui.Select):
             self.review_data['score'],
             self.review_data['line_comment'],
             self.review_data['comment'],
-            is_select_callback=True
+            is_select_callback=False
         )
 
         print(f"[DEBUG] MovieSelectMenu.callback() 완료")
