@@ -128,10 +128,14 @@ async def _save_and_send_review(
     if img_url:
         print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 시작 - URL: {img_url}")
         timeout = aiohttp.ClientTimeout(total=30)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': img_url
+        }
 
         for attempt in range(3):
             try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                     async with session.get(img_url) as img_response:
                         print(f"[DEBUG] _save_and_send_review() 이미지 응답 상태: {img_response.status} (시도 {attempt + 1})")
                         if img_response.status == 200:
