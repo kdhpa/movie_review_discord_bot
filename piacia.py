@@ -394,7 +394,7 @@ bot = MyBot(command_prefix="/", intents=discord.Intents.default())
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
 ])
 async def review_command(interaction: discord.Interaction, 카테고리: str):
-    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, interaction.user.display_name)
+    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, str(interaction.user), interaction.user.display_name)
     await interaction.response.send_modal(modal)
 
 
