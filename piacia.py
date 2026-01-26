@@ -45,8 +45,7 @@ async def _save_and_send_review(
     category: str,
     score_float: float,
     line_comment: str,
-    comment: str,
-    is_select_callback: bool = False
+    comment: str
 ):
     """리뷰 저장 및 메시지 전송 (공통 로직)"""
     print(f"[DEBUG] _save_and_send_review() 시작")
@@ -61,16 +60,10 @@ async def _save_and_send_review(
     print(f"[DEBUG] _save_and_send_review() 중복 확인 중...")
     if db.has_review(interaction.user.id, title, db_category):
         print(f"[DEBUG] _save_and_send_review() 중복 발견")
-        if is_select_callback:
-            await interaction.response.edit_message(
-                content=f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.",
-                view=None
-            )
-        else:
-            await interaction.followup.send(
-                f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.",
-                ephemeral=True
-            )
+        await interaction.followup.send(
+            f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.",
+            ephemeral=True
+        )
         return
 
     # DB 저장
@@ -134,29 +127,17 @@ async def _save_and_send_review(
                         img_data = await img_response.read()
                         print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 성공 (크기: {len(img_data)} bytes)")
                         file = discord.File(io.BytesIO(img_data), filename="image.jpg")
-                        if is_select_callback:
-                            await interaction.response.send_message(filled_form, file=file)
-                        else:
-                            await interaction.followup.send(filled_form, file=file)
+                        await interaction.followup.send(filled_form, file=file)
                         print(f"[DEBUG] _save_and_send_review() 이미지 포함 메시지 전송 완료")
                     else:
                         print(f"[DEBUG] _save_and_send_review() 이미지 다운로드 실패 (상태: {img_response.status}), 텍스트만 전송")
-                        if is_select_callback:
-                            await interaction.response.send_message(filled_form)
-                        else:
-                            await interaction.followup.send(filled_form)
+                        await interaction.followup.send(filled_form)
         except Exception as e:
             print(f"[ERROR] _save_and_send_review() 이미지 다운로드 중 오류: {e}")
-            if is_select_callback:
-                await interaction.response.send_message(filled_form)
-            else:
-                await interaction.followup.send(filled_form)
+            await interaction.followup.send(filled_form)
     else:
         print(f"[DEBUG] _save_and_send_review() img_url 없음, 텍스트만 전송")
-        if is_select_callback:
-            await interaction.response.send_message(filled_form)
-        else:
-            await interaction.followup.send(filled_form)
+        await interaction.followup.send(filled_form)
 
     print(f"[DEBUG] _save_and_send_review() 완료")
 
@@ -214,8 +195,7 @@ class MovieSelectMenu(discord.ui.Select):
             self.view.category,
             self.review_data['score'],
             self.review_data['line_comment'],
-            self.review_data['comment'],
-            is_select_callback=False
+            self.review_data['comment']
         )
 
         print(f"[DEBUG] MovieSelectMenu.callback() 완료")
@@ -302,8 +282,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                         self.category,
                         score_float,
                         line_comment,
-                        comment,
-                        is_select_callback=False
+                        comment
                     )
                     return
 
@@ -357,8 +336,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 self.category,
                 score_float,
                 line_comment,
-                comment,
-                is_select_callback=False
+                comment
             )
 
 
