@@ -6,6 +6,8 @@ MOVIE_FORM = (
     "평점 : {score} \n"
     "\n"
     "\"{one_line_text}\"\n"
+    "\n"
+    "작성자: {author_name} \n"
 )
 
 MANGA_FORM = (
@@ -16,6 +18,8 @@ MANGA_FORM = (
     "평점 : {score} \n"
     "\n"
     "\"{one_line_text}\"\n"
+    "\n"
+    "작성자: {author_name} \n"
 )
 
 WEBTOON_FORM = (
@@ -26,4 +30,6 @@ WEBTOON_FORM = (
     "평점 : {score} \n"
     "\n"
     "\"{one_line_text}\"\n"
+    "\n"
+    "작성자: {author_name} \n"
 )

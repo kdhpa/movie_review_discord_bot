@@ -45,10 +45,12 @@ async def _save_and_send_review(
     category: str,
     score_float: float,
     line_comment: str,
-    comment: str
+    comment: str,
+    author_id: int,
+    author_name: str
 ):
     """리뷰 저장 및 메시지 전송 (공통 로직)"""
-    print(f"[DEBUG] _save_and_send_review() 시작")
+    print(f"[DEBUG] _save_and_send_review() 시작 - 작성자: {author_name}")
 
     title = movie_info['title']
     year = movie_info['year']
@@ -58,7 +60,7 @@ async def _save_and_send_review(
 
     # 중복 확인
     print(f"[DEBUG] _save_and_send_review() 중복 확인 중...")
-    if db.has_review(interaction.user.id, title, db_category):
+    if db.has_review(author_id, title, db_category):
         print(f"[DEBUG] _save_and_send_review() 중복 발견")
         await interaction.followup.send(
             f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.",
@@ -69,8 +71,8 @@ async def _save_and_send_review(
     # DB 저장
     print(f"[DEBUG] _save_and_send_review() DB 저장 중...")
     db.save_review(
-        user_id=interaction.user.id,
-        username=str(interaction.user),
+        user_id=author_id,
+        username=author_name,
         movie_title=title,
         movie_year=year,
         director=director,
@@ -91,7 +93,8 @@ async def _save_and_send_review(
             director_name=director,
             year=year,
             score=return_score_emoji(score_float),
-            one_line_text=line_comment
+            one_line_text=line_comment,
+            author_name = author_name
         )
         filled_form = filled_form.replace("🎬", emoji)
         filled_form += f"\n🏷️ 카테고리: {cat_name}"
@@ -101,7 +104,8 @@ async def _save_and_send_review(
             author=director,
             year=year,
             score=return_score_emoji(score_float),
-            one_line_text=line_comment
+            one_line_text=line_comment,
+            author_name = author_name
         )
     else:  # webtoon
         filled_form = WEBTOON_FORM.format(
@@ -109,7 +113,8 @@ async def _save_and_send_review(
             platform=year,
             author=director,
             score=return_score_emoji(score_float),
-            one_line_text=line_comment
+            one_line_text=line_comment,
+            author_name = author_name
         )
 
     if comment:
@@ -147,7 +152,7 @@ async def _save_and_send_review(
 class MovieSelectMenu(discord.ui.Select):
     """TMDB 검색 결과 선택 메뉴"""
 
-    def __init__(self, movies: list, review_data: dict):
+    def __init__(self, movies: list, form: 'ReviewForm'):
         options = [
             discord.SelectOption(
                 label=f"{movie['title']} ({movie['year']})",
@@ -166,11 +171,10 @@ class MovieSelectMenu(discord.ui.Select):
         )
 
         self.movies = movies
-        self.review_data = review_data
-        self.db = None  # View에서 주입됨
+        self.form = form  # ReviewForm 인스턴스 직접 참조
 
     async def callback(self, interaction: discord.Interaction):
-        print(f"[DEBUG] MovieSelectMenu.callback() 시작")
+        print(f"[DEBUG] MovieSelectMenu.callback() 시작 - 작성자: {self.form.author_name}")
 
         selected_idx = int(self.values[0])
         movie = self.movies[selected_idx]
@@ -187,15 +191,17 @@ class MovieSelectMenu(discord.ui.Select):
                     session, movie['tmdb_id'], movie['media_type']
                 )
 
-        # 리뷰 저장 및 전송
+        # 리뷰 저장 및 전송 - form에서 직접 참조
         await _save_and_send_review(
             interaction,
-            self.db,
+            self.form.db,
             movie,
-            self.view.category,
-            self.review_data['score'],
-            self.review_data['line_comment'],
-            self.review_data['comment']
+            self.form.category,
+            self.form.score,
+            self.form.line_comment,
+            self.form.comment,
+            self.form.author_id,
+            self.form.author_name
         )
 
         print(f"[DEBUG] MovieSelectMenu.callback() 완료")
@@ -204,12 +210,10 @@ class MovieSelectMenu(discord.ui.Select):
 class MovieSelectView(discord.ui.View):
     """TMDB 검색 결과 선택 View"""
 
-    def __init__(self, movies: list, review_data: dict, db, category: str):
+    def __init__(self, movies: list, form: 'ReviewForm'):
         super().__init__(timeout=60.0)
 
-        select_menu = MovieSelectMenu(movies, review_data)
-        select_menu.db = db
-        self.category = category
+        select_menu = MovieSelectMenu(movies, form)
         self.add_item(select_menu)
 
     async def on_timeout(self):
@@ -219,27 +223,35 @@ class MovieSelectView(discord.ui.View):
 
 
 class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
-    def __init__(self, db, category):
+    def __init__(self, db, category, author_id: int, author_name: str):
         super().__init__()
         self.db = db
         self.category = category  # 'tmdb', 'manga', 'webtoon'
+        # 작성자 정보 (생성 시 저장)
+        self.author_name = author_name
+        self.author_id = author_id
+        # 리뷰 데이터 (on_submit에서 저장)
+        self.score = None
+        self.line_comment = None
+        self.comment = None
         self.add_item(discord.ui.TextInput(label="작품 이름", placeholder="제목을 입력하세요"))
         self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
         self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
         self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
 
     async def on_submit(self, interaction: discord.Interaction):
-        print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}")
+        print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}, 작성자: {self.author_name}")
+
         title = self.children[0].value
         score = self.children[1].value
-        line_comment = self.children[2].value
-        comment = self.children[3].value
+        self.line_comment = self.children[2].value
+        self.comment = self.children[3].value
 
         print(f"[DEBUG] ReviewForm.on_submit() 입력값 - title: {title}, score: {score}")
 
         try:
-            score_float = float(score)
-            if not (0 <= score_float <= 5):
+            self.score = float(score)
+            if not (0 <= self.score <= 5):
                 await interaction.response.send_message("❌ 별점은 0~5 사이의 숫자를 입력해주세요!", ephemeral=True)
                 return
         except ValueError:
@@ -280,23 +292,18 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                         self.db,
                         movie,
                         self.category,
-                        score_float,
-                        line_comment,
-                        comment
+                        self.score,
+                        self.line_comment,
+                        self.comment,
+                        self.author_id,
+                        self.author_name
                     )
                     return
 
                 # 다중 결과 → Select Menu 표시
                 print(f"[DEBUG] ReviewForm.on_submit() TMDB 다중 결과 - Select Menu 표시 ({len(movies)}개)")
-                review_data = {
-                    'score': score_float,
-                    'line_comment': line_comment,
-                    'comment': comment,
-                    'user_id': interaction.user.id,
-                    'username': str(interaction.user)
-                }
 
-                view = MovieSelectView(movies, review_data, self.db, self.category)
+                view = MovieSelectView(movies, self)
 
                 await interaction.followup.send(
                     f"🔍 '{original_title}' 검색 결과 {len(movies)}개입니다. 작품을 선택하세요:",
@@ -334,9 +341,11 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 self.db,
                 movie_info,
                 self.category,
-                score_float,
-                line_comment,
-                comment
+                self.score,
+                self.line_comment,
+                self.comment,
+                self.author_id,
+                self.author_name
             )
 
 
@@ -371,7 +380,7 @@ bot = MyBot(command_prefix="/", intents=discord.Intents.default())
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
 ])
 async def review_command(interaction: discord.Interaction, 카테고리: str):
-    modal = ReviewForm(bot.db, 카테고리)
+    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, str(interaction.user))
     await interaction.response.send_modal(modal)
 
 
