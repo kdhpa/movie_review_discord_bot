@@ -475,7 +475,7 @@ class GrokSearcher:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content = data.get("output", [{}])[0].get("content", "")
                     print(f"[DEBUG] GrokSearcher.fetch_movie_news() 성공")
                     return content
                 else:
@@ -556,7 +556,7 @@ class GrokSearcher:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content = data.get("output", [{}])[0].get("content", "")
                     print(f"[DEBUG] GrokSearcher.fetch_categorized_news() 응답 수신")
 
                     # JSON 파싱 시도
@@ -631,7 +631,7 @@ class GrokSearcher:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content = data.get("output", [{}])[0].get("content", "")
                     print(f"[DEBUG] _fetch_news_group({group}) 응답 수신")
 
                     # JSON 파싱
