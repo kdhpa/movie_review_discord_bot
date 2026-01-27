@@ -2,50 +2,48 @@ import os
 import re
 import json
 import asyncio
+from datetime import datetime, timedelta
 from googletrans import Translator
 
 TMDB_API_KEY = os.getenv("TMDB_API")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 translator = Translator()
 
-# 그룹별 뉴스 프롬프트 정의
+# 그룹별 뉴스 프롬프트 정의 (실시간 X/웹 검색용)
 NEWS_GROUP_PROMPTS = {
     "movie": {
-        "system": "당신은 영화 뉴스 속보 전문 기자입니다. 방금 발표되거나 지금 막 화제가 되고 있는 영화 소식만 다룹니다.",
-        "query": """지금 막 발표되거나 화제가 되고 있는 영화 소식 2-3개를 알려주세요.
+        "system": "당신은 영화 뉴스 속보 전문 기자입니다. X(트위터)와 웹에서 실시간 검색하여 방금 발표된 영화 소식과 루머를 찾습니다.",
+        "query": """X와 웹을 검색하여 지금 막 화제가 되고 있는 영화 뉴스와 루머 2-3개를 찾아주세요.
 
-조건:
-- 오늘~어제 사이에 발표/공개된 소식만
-- 이미 알려진 오래된 정보 제외
-- 신작 발표, 캐스팅 확정, 티저/예고편 공개, 흥행 기록 경신 등
+검색 대상:
+- 신작 발표, 캐스팅 확정/루머, 티저/예고편 공개
+- 흥행 기록, 제작 소식, 업계 루머
 
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요:
-{"movie": [{"title": "제목", "content": "내용 2-3문장", "source": "출처"}]}"""
+반드시 아래 JSON 형식으로만 응답:
+{"movie": [{"title": "제목", "content": "내용 2-3문장", "source": "출처 URL 또는 X 계정"}]}"""
     },
     "drama": {
-        "system": "당신은 드라마/TV시리즈 속보 전문 기자입니다. 방금 발표되거나 지금 막 화제가 되고 있는 드라마 소식만 다룹니다.",
-        "query": """지금 막 발표되거나 화제가 되고 있는 드라마 소식 2-3개를 알려주세요.
+        "system": "당신은 드라마/TV시리즈 속보 전문 기자입니다. X와 웹에서 실시간 검색하여 방금 발표된 드라마 소식을 찾습니다.",
+        "query": """X와 웹을 검색하여 지금 막 화제가 되고 있는 드라마 뉴스 2-3개를 찾아주세요.
 
-조건:
-- 오늘~어제 사이에 발표/공개된 소식만
-- 한국 드라마, OTT(넷플릭스/디즈니+), 미드 포함
-- 신작 공개, 캐스팅 확정, 시청률 기록, 시즌 발표 등
+검색 대상:
+- 한국 드라마, OTT(넷플릭스/디즈니+/티빙), 미드
+- 신작 공개, 캐스팅, 시청률 기록, 시즌 발표
 
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요:
+반드시 아래 JSON 형식으로만 응답:
 {"drama": [{"title": "제목", "content": "내용 2-3문장", "source": "출처"}]}"""
     },
     "acg": {
-        "system": "당신은 애니메이션/만화/웹툰 속보 전문 기자입니다. 방금 발표되거나 지금 막 화제가 되고 있는 소식만 다룹니다.",
-        "query": """지금 막 발표되거나 화제가 되고 있는 애니메이션, 만화, 웹툰 소식을 카테고리별로 알려주세요.
+        "system": "당신은 애니메이션/만화/웹툰 속보 전문 기자입니다. X와 웹에서 실시간 검색하여 방금 발표된 소식을 찾습니다.",
+        "query": """X와 웹을 검색하여 지금 막 화제가 되고 있는 애니/만화/웹툰 뉴스를 찾아주세요.
 
-조건:
-- 오늘~어제 사이에 발표/공개된 소식만
-- anime: 일본 애니메이션 (TVアニメ, 극장판, 성우)
-- manga: 일본 만화 (주간/월간 연재, 완결, 작가)
+검색 대상:
+- anime: 일본 애니메이션 (방영, 극장판, 성우, 제작 발표)
+- manga: 일본 만화 (연재, 완결, 작가 소식)
 - webtoon: 한국 웹툰 (네이버/카카오, 영상화, 작가)
 - 각 카테고리당 1-2개
 
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요:
+반드시 아래 JSON 형식으로만 응답:
 {
   "anime": [{"title": "제목", "content": "내용", "source": "출처"}],
   "manga": [{"title": "제목", "content": "내용", "source": "출처"}],
@@ -435,10 +433,14 @@ class GrokSearcher:
 
     @staticmethod
     async def fetch_movie_news(session):
-        """Grok API를 호출하여 영화 루머/소식 가져오기"""
+        """Grok API를 호출하여 영화 루머/소식 가져오기 - 실시간 X/웹 검색 지원"""
         if not GROK_API_KEY:
             print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
             return None
+
+        # 날짜 계산 (어제~오늘)
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         url = "https://api.x.ai/v1/chat/completions"
         headers = {
@@ -447,15 +449,28 @@ class GrokSearcher:
         }
 
         payload = {
-            "model": "grok-3-latest",
+            "model": "grok-4-1-fast",  # 검색 도구 지원 모델
             "messages": [
                 {
                     "role": "system",
-                    "content": "당신은 영화 소식 전문가입니다. 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."
+                    "content": "당신은 영화 소식 전문가입니다. X와 웹을 검색하여 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."
                 },
                 {
                     "role": "user",
-                    "content": "오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처가 있다면 함께 알려주세요."
+                    "content": "X와 웹을 검색하여 오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처(URL 또는 X 계정)를 함께 알려주세요."
+                }
+            ],
+            "tools": [
+                {
+                    "type": "x_search",
+                    "x_search": {
+                        "from_date": yesterday,
+                        "to_date": today
+                    }
+                },
+                {
+                    "type": "web_search",
+                    "web_search": {}
                 }
             ],
             "temperature": 0.7
@@ -478,10 +493,14 @@ class GrokSearcher:
 
     @staticmethod
     async def fetch_categorized_news(session):
-        """카테고리별 엔터테인먼트 뉴스 가져오기 (JSON 형식)"""
+        """카테고리별 엔터테인먼트 뉴스 가져오기 (JSON 형식) - 실시간 X/웹 검색 지원"""
         if not GROK_API_KEY:
             print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
             return None
+
+        # 날짜 계산 (어제~오늘)
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         url = "https://api.x.ai/v1/chat/completions"
         headers = {
@@ -490,16 +509,16 @@ class GrokSearcher:
         }
 
         payload = {
-            "model": "grok-3-latest",
+            "model": "grok-4-1-fast",  # 검색 도구 지원 모델
             "messages": [
                 {
                     "role": "system",
-                    "content": """당신은 엔터테인먼트 뉴스 전문가입니다.
+                    "content": """당신은 엔터테인먼트 뉴스 전문가입니다. X와 웹을 검색하여 실시간 뉴스를 찾습니다.
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요."""
                 },
                 {
                     "role": "user",
-                    "content": """오늘의 최신 엔터테인먼트 소식을 카테고리별로 정리해주세요.
+                    "content": """X와 웹을 검색하여 오늘의 최신 엔터테인먼트 소식을 카테고리별로 정리해주세요.
 
 반드시 아래 JSON 형식으로 응답하세요:
 {
@@ -507,7 +526,7 @@ class GrokSearcher:
     {"title": "헤드라인 제목", "summary": "한줄 요약", "category": "movie", "importance": 5}
   ],
   "movie": [
-    {"title": "뉴스 제목", "content": "상세 내용 (2-3문장)", "source": "출처"}
+    {"title": "뉴스 제목", "content": "상세 내용 (2-3문장)", "source": "출처 URL 또는 X 계정"}
   ],
   "drama": [...],
   "anime": [...],
@@ -519,12 +538,25 @@ class GrokSearcher:
 - headlines: 가장 중요한 뉴스 3-5개 (importance 1-5, 높은 순으로 정렬)
 - 각 카테고리당 2-3개의 뉴스
 - 뉴스가 없는 카테고리는 빈 배열 []
-- 실제 최신 뉴스만 포함 (오늘~최근 며칠 이내)
+- 실제 최신 뉴스만 포함 (오늘~어제)
 - 영화(movie): 영화 제작, 캐스팅, 개봉 소식
 - 드라마(drama): TV/OTT 드라마 소식
 - 애니(anime): 일본 애니메이션 소식
 - 만화(manga): 일본 만화 소식
 - 웹툰(webtoon): 한국 웹툰 소식"""
+                }
+            ],
+            "tools": [
+                {
+                    "type": "x_search",
+                    "x_search": {
+                        "from_date": yesterday,
+                        "to_date": today
+                    }
+                },
+                {
+                    "type": "web_search",
+                    "web_search": {}
                 }
             ],
             "temperature": 0.7
@@ -567,7 +599,7 @@ class GrokSearcher:
 
     @staticmethod
     async def _fetch_news_group(session, group: str):
-        """특정 그룹의 뉴스 가져오기 (movie, drama, acg)"""
+        """특정 그룹의 뉴스 가져오기 (movie, drama, acg) - 실시간 X/웹 검색 지원"""
         if not GROK_API_KEY:
             print(f"[ERROR] GROK_API_KEY가 설정되지 않았습니다. (group: {group})")
             return {}
@@ -577,6 +609,10 @@ class GrokSearcher:
             print(f"[ERROR] 알 수 없는 그룹: {group}")
             return {}
 
+        # 날짜 계산 (어제~오늘)
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
         url = "https://api.x.ai/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -584,10 +620,23 @@ class GrokSearcher:
         }
 
         payload = {
-            "model": "grok-3-latest",
+            "model": "grok-4-1-fast",  # 검색 도구 지원 모델
             "messages": [
                 {"role": "system", "content": prompts["system"]},
                 {"role": "user", "content": prompts["query"]}
+            ],
+            "tools": [
+                {
+                    "type": "x_search",
+                    "x_search": {
+                        "from_date": yesterday,
+                        "to_date": today
+                    }
+                },
+                {
+                    "type": "web_search",
+                    "web_search": {}
+                }
             ],
             "temperature": 0.7
         }
