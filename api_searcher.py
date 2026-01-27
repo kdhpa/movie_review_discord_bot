@@ -461,13 +461,8 @@ class GrokSearcher:
                 }
             ],
             "tools": [
-                {
-                    "type": "live_search",
-                    "sources": [{"type": "x"}, {"type": "web"}],
-                    "live_search": {
-                        "max_results": 20
-                    }
-                }
+                {"type": "web_search"},
+                {"type": "x_search"}
             ],
             "temperature": 0.7
         }
@@ -543,13 +538,8 @@ class GrokSearcher:
                 }
             ],
             "tools": [
-                {
-                    "type": "live_search",
-                    "sources": [{"type": "x"}, {"type": "web"}],
-                    "live_search": {
-                        "max_results": 20
-                    }
-                }
+                {"type": "web_search"},
+                {"type": "x_search"}
             ],
             "temperature": 0.7
         }
@@ -618,13 +608,8 @@ class GrokSearcher:
                 {"role": "user", "content": prompts["query"]}
             ],
             "tools": [
-                {
-                    "type": "live_search",
-                    "sources": [{"type": "x"}, {"type": "web"}],
-                    "live_search": {
-                        "max_results": 20
-                    }
-                }
+                {"type": "web_search"},
+                {"type": "x_search"}
             ],
             "temperature": 0.7
         }
