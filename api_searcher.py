@@ -460,19 +460,15 @@ class GrokSearcher:
                     "content": "X와 웹을 검색하여 오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처(URL 또는 X 계정)를 함께 알려주세요."
                 }
             ],
-            "tools": [
-                {
-                    "type": "x_search",
-                    "x_search": {
-                        "from_date": yesterday,
-                        "to_date": today
-                    }
-                },
-                {
-                    "type": "web_search",
-                    "web_search": {}
-                }
-            ],
+            "search_parameters": {
+                "mode": "on",
+                "from_date": yesterday,
+                "to_date": today,
+                "sources": [
+                    {"type": "x"},
+                    {"type": "web"}
+                ]
+            },
             "temperature": 0.7
         }
 
@@ -546,19 +542,15 @@ class GrokSearcher:
 - 웹툰(webtoon): 한국 웹툰 소식"""
                 }
             ],
-            "tools": [
-                {
-                    "type": "x_search",
-                    "x_search": {
-                        "from_date": yesterday,
-                        "to_date": today
-                    }
-                },
-                {
-                    "type": "web_search",
-                    "web_search": {}
-                }
-            ],
+            "search_parameters": {
+                "mode": "on",
+                "from_date": yesterday,
+                "to_date": today,
+                "sources": [
+                    {"type": "x"},
+                    {"type": "web"}
+                ]
+            },
             "temperature": 0.7
         }
 
@@ -625,19 +617,15 @@ class GrokSearcher:
                 {"role": "system", "content": prompts["system"]},
                 {"role": "user", "content": prompts["query"]}
             ],
-            "tools": [
-                {
-                    "type": "x_search",
-                    "x_search": {
-                        "from_date": yesterday,
-                        "to_date": today
-                    }
-                },
-                {
-                    "type": "web_search",
-                    "web_search": {}
-                }
-            ],
+            "search_parameters": {
+                "mode": "on",
+                "from_date": yesterday,
+                "to_date": today,
+                "sources": [
+                    {"type": "x"},
+                    {"type": "web"}
+                ]
+            },
             "temperature": 0.7
         }
 
