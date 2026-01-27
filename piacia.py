@@ -9,6 +9,7 @@ CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "�
 CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰"}
 from database import Database
 from api_searcher import ContentSearcher
+from news_scheduler import NewsScheduler
 import io
 import os
 
@@ -373,6 +374,7 @@ class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.db = Database()
+        self.news_scheduler = NewsScheduler(self)
 
     async def on_ready(self):
         print(f'Logged in as {self.user}')
@@ -381,8 +383,12 @@ class MyBot(commands.Bot):
         self.tree.add_command(review_command)
         self.tree.add_command(my_reviews_command)
         self.tree.add_command(stats_command)
+        self.tree.add_command(news_command)
         self.tree.add_command(delete_review_command)
         await self.tree.sync()
+
+        # 뉴스 스케줄러 시작
+        self.news_scheduler.start()
 
 
 bot = MyBot(command_prefix="/", intents=discord.Intents.default())
@@ -473,6 +479,19 @@ async def stats_command(interaction: discord.Interaction, 제목: str, 카테고
     embed.add_field(name="최저 평점", value=f"{stats['min_score']}/5", inline=True)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@discord.app_commands.command(name="뉴스", description="[관리자] 일일 엔터테인먼트 리포트를 즉시 전송합니다.")
+@discord.app_commands.default_permissions(administrator=True)
+async def news_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    success = await bot.news_scheduler.send_news_now(interaction.channel)
+
+    if success:
+        await interaction.followup.send("일일 엔터테인먼트 리포트를 전송했습니다.", ephemeral=True)
+    else:
+        await interaction.followup.send("뉴스를 가져오는 데 실패했습니다. GROK_API_KEY를 확인해주세요.", ephemeral=True)
 
 
 @discord.app_commands.command(name="리뷰삭제", description="특정 작품의 내 리뷰를 삭제합니다.")

@@ -1,9 +1,58 @@
 import os
 import re
+import json
+import asyncio
 from googletrans import Translator
 
 TMDB_API_KEY = os.getenv("TMDB_API")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 translator = Translator()
+
+# 그룹별 뉴스 프롬프트 정의
+NEWS_GROUP_PROMPTS = {
+    "movie": {
+        "system": "당신은 영화 뉴스 속보 전문 기자입니다. 방금 발표되거나 지금 막 화제가 되고 있는 영화 소식만 다룹니다.",
+        "query": """지금 막 발표되거나 화제가 되고 있는 영화 소식 2-3개를 알려주세요.
+
+조건:
+- 오늘~어제 사이에 발표/공개된 소식만
+- 이미 알려진 오래된 정보 제외
+- 신작 발표, 캐스팅 확정, 티저/예고편 공개, 흥행 기록 경신 등
+
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요:
+{"movie": [{"title": "제목", "content": "내용 2-3문장", "source": "출처"}]}"""
+    },
+    "drama": {
+        "system": "당신은 드라마/TV시리즈 속보 전문 기자입니다. 방금 발표되거나 지금 막 화제가 되고 있는 드라마 소식만 다룹니다.",
+        "query": """지금 막 발표되거나 화제가 되고 있는 드라마 소식 2-3개를 알려주세요.
+
+조건:
+- 오늘~어제 사이에 발표/공개된 소식만
+- 한국 드라마, OTT(넷플릭스/디즈니+), 미드 포함
+- 신작 공개, 캐스팅 확정, 시청률 기록, 시즌 발표 등
+
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요:
+{"drama": [{"title": "제목", "content": "내용 2-3문장", "source": "출처"}]}"""
+    },
+    "acg": {
+        "system": "당신은 애니메이션/만화/웹툰 속보 전문 기자입니다. 방금 발표되거나 지금 막 화제가 되고 있는 소식만 다룹니다.",
+        "query": """지금 막 발표되거나 화제가 되고 있는 애니메이션, 만화, 웹툰 소식을 카테고리별로 알려주세요.
+
+조건:
+- 오늘~어제 사이에 발표/공개된 소식만
+- anime: 일본 애니메이션 (TVアニメ, 극장판, 성우)
+- manga: 일본 만화 (주간/월간 연재, 완결, 작가)
+- webtoon: 한국 웹툰 (네이버/카카오, 영상화, 작가)
+- 각 카테고리당 1-2개
+
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요:
+{
+  "anime": [{"title": "제목", "content": "내용", "source": "출처"}],
+  "manga": [{"title": "제목", "content": "내용", "source": "출처"}],
+  "webtoon": [{"title": "제목", "content": "내용", "source": "출처"}]
+}"""
+    }
+}
 
 async def is_korean(text):
     """한글이 포함되어 있는지 확인"""
@@ -379,3 +428,257 @@ class ContentSearcher:
 
         print(f"[DEBUG] search_webtoon() [1차] 실패")
         return None, None, None, None
+
+
+class GrokSearcher:
+    """Grok AI API를 통해 영화 소식을 가져오는 클래스"""
+
+    @staticmethod
+    async def fetch_movie_news(session):
+        """Grok API를 호출하여 영화 루머/소식 가져오기"""
+        if not GROK_API_KEY:
+            print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
+            return None
+
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GROK_API_KEY}"
+        }
+
+        payload = {
+            "model": "grok-3-latest",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "당신은 영화 소식 전문가입니다. 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."
+                },
+                {
+                    "role": "user",
+                    "content": "오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처가 있다면 함께 알려주세요."
+                }
+            ],
+            "temperature": 0.7
+        }
+
+        try:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    print(f"[DEBUG] GrokSearcher.fetch_movie_news() 성공")
+                    return content
+                else:
+                    error_text = await response.text()
+                    print(f"[ERROR] GrokSearcher.fetch_movie_news() 실패 - 상태: {response.status}, 오류: {error_text}")
+                    return None
+        except Exception as e:
+            print(f"[ERROR] GrokSearcher.fetch_movie_news() 예외 발생: {e}")
+            return None
+
+    @staticmethod
+    async def fetch_categorized_news(session):
+        """카테고리별 엔터테인먼트 뉴스 가져오기 (JSON 형식)"""
+        if not GROK_API_KEY:
+            print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
+            return None
+
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GROK_API_KEY}"
+        }
+
+        payload = {
+            "model": "grok-3-latest",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": """당신은 엔터테인먼트 뉴스 전문가입니다.
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요."""
+                },
+                {
+                    "role": "user",
+                    "content": """오늘의 최신 엔터테인먼트 소식을 카테고리별로 정리해주세요.
+
+반드시 아래 JSON 형식으로 응답하세요:
+{
+  "headlines": [
+    {"title": "헤드라인 제목", "summary": "한줄 요약", "category": "movie", "importance": 5}
+  ],
+  "movie": [
+    {"title": "뉴스 제목", "content": "상세 내용 (2-3문장)", "source": "출처"}
+  ],
+  "drama": [...],
+  "anime": [...],
+  "manga": [...],
+  "webtoon": [...]
+}
+
+규칙:
+- headlines: 가장 중요한 뉴스 3-5개 (importance 1-5, 높은 순으로 정렬)
+- 각 카테고리당 2-3개의 뉴스
+- 뉴스가 없는 카테고리는 빈 배열 []
+- 실제 최신 뉴스만 포함 (오늘~최근 며칠 이내)
+- 영화(movie): 영화 제작, 캐스팅, 개봉 소식
+- 드라마(drama): TV/OTT 드라마 소식
+- 애니(anime): 일본 애니메이션 소식
+- 만화(manga): 일본 만화 소식
+- 웹툰(webtoon): 한국 웹툰 소식"""
+                }
+            ],
+            "temperature": 0.7
+        }
+
+        try:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() 응답 수신")
+
+                    # JSON 파싱 시도
+                    try:
+                        # JSON 블록 추출 (```json ... ``` 형식일 경우 처리)
+                        if "```json" in content:
+                            json_start = content.find("```json") + 7
+                            json_end = content.find("```", json_start)
+                            content = content[json_start:json_end].strip()
+                        elif "```" in content:
+                            json_start = content.find("```") + 3
+                            json_end = content.find("```", json_start)
+                            content = content[json_start:json_end].strip()
+
+                        news_data = json.loads(content)
+                        print(f"[DEBUG] GrokSearcher.fetch_categorized_news() JSON 파싱 성공")
+                        return news_data
+                    except json.JSONDecodeError as e:
+                        print(f"[WARNING] JSON 파싱 실패: {e}")
+                        print(f"[DEBUG] 원본 응답: {content[:500]}...")
+                        # 폴백: 기존 방식으로 raw_content 반환
+                        return {"raw_content": content}
+                else:
+                    error_text = await response.text()
+                    print(f"[ERROR] GrokSearcher.fetch_categorized_news() 실패 - 상태: {response.status}, 오류: {error_text}")
+                    return None
+        except Exception as e:
+            print(f"[ERROR] GrokSearcher.fetch_categorized_news() 예외 발생: {e}")
+            return None
+
+    @staticmethod
+    async def _fetch_news_group(session, group: str):
+        """특정 그룹의 뉴스 가져오기 (movie, drama, acg)"""
+        if not GROK_API_KEY:
+            print(f"[ERROR] GROK_API_KEY가 설정되지 않았습니다. (group: {group})")
+            return {}
+
+        prompts = NEWS_GROUP_PROMPTS.get(group)
+        if not prompts:
+            print(f"[ERROR] 알 수 없는 그룹: {group}")
+            return {}
+
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GROK_API_KEY}"
+        }
+
+        payload = {
+            "model": "grok-3-latest",
+            "messages": [
+                {"role": "system", "content": prompts["system"]},
+                {"role": "user", "content": prompts["query"]}
+            ],
+            "temperature": 0.7
+        }
+
+        try:
+            print(f"[DEBUG] _fetch_news_group({group}) API 호출 시작")
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    print(f"[DEBUG] _fetch_news_group({group}) 응답 수신")
+
+                    # JSON 파싱
+                    try:
+                        # JSON 블록 추출 (```json ... ``` 형식일 경우 처리)
+                        if "```json" in content:
+                            json_start = content.find("```json") + 7
+                            json_end = content.find("```", json_start)
+                            content = content[json_start:json_end].strip()
+                        elif "```" in content:
+                            json_start = content.find("```") + 3
+                            json_end = content.find("```", json_start)
+                            content = content[json_start:json_end].strip()
+
+                        news_data = json.loads(content)
+                        print(f"[DEBUG] _fetch_news_group({group}) JSON 파싱 성공: {list(news_data.keys())}")
+                        return news_data
+                    except json.JSONDecodeError as e:
+                        print(f"[WARNING] _fetch_news_group({group}) JSON 파싱 실패: {e}")
+                        print(f"[DEBUG] 원본 응답: {content[:300]}...")
+                        return {}
+                else:
+                    error_text = await response.text()
+                    print(f"[ERROR] _fetch_news_group({group}) 실패 - 상태: {response.status}, 오류: {error_text}")
+                    return {}
+        except Exception as e:
+            print(f"[ERROR] _fetch_news_group({group}) 예외 발생: {e}")
+            return {}
+
+    @staticmethod
+    def _generate_headlines(news_data: dict) -> list:
+        """카테고리별 뉴스에서 헤드라인 생성"""
+        headlines = []
+        importance_map = {"movie": 5, "drama": 4, "anime": 3, "manga": 2, "webtoon": 2}
+
+        for category in ["movie", "drama", "anime", "manga", "webtoon"]:
+            news_list = news_data.get(category, [])
+            if news_list:
+                # 각 카테고리에서 첫 번째 뉴스를 헤드라인으로 선정
+                first_news = news_list[0]
+                headlines.append({
+                    "title": first_news.get("title", "제목 없음"),
+                    "summary": first_news.get("content", "")[:50] + "..." if len(first_news.get("content", "")) > 50 else first_news.get("content", ""),
+                    "category": category,
+                    "importance": importance_map.get(category, 1)
+                })
+
+        # 중요도 순으로 정렬
+        headlines.sort(key=lambda x: x["importance"], reverse=True)
+        return headlines[:5]  # 최대 5개
+
+    @staticmethod
+    async def fetch_all_categorized_news(session):
+        """3그룹 뉴스를 병렬로 수집 후 5개 카테고리로 분리"""
+        groups = ['movie', 'drama', 'acg']
+
+        # asyncio.gather로 3회 병렬 호출
+        print(f"[INFO] fetch_all_categorized_news() 3그룹 병렬 호출 시작: {groups}")
+        tasks = [GrokSearcher._fetch_news_group(session, g) for g in groups]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 결과 병합 (5개 카테고리로 분리)
+        news_data = {"movie": [], "drama": [], "anime": [], "manga": [], "webtoon": []}
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"[ERROR] 그룹 '{groups[i]}' 호출 실패: {result}")
+                continue
+            if isinstance(result, dict):
+                for key in news_data.keys():
+                    if key in result:
+                        news_data[key].extend(result[key])
+
+        # 뉴스가 하나도 없으면 폴백
+        total_news = sum(len(v) for v in news_data.values())
+        if total_news == 0:
+            print("[WARNING] 모든 그룹에서 뉴스를 가져오지 못함 - 기존 fetch_categorized_news() 폴백")
+            return await GrokSearcher.fetch_categorized_news(session)
+
+        # 헤드라인 생성
+        news_data["headlines"] = GrokSearcher._generate_headlines(news_data)
+
+        print(f"[INFO] fetch_all_categorized_news() 완료 - 총 {total_news}개 뉴스")
+        return news_data
