@@ -464,7 +464,8 @@ class GrokSearcher:
                 {
                     "type": "live_search",
                     "live_search": {
-                        "max_results": 20
+                        "max_results": 20,
+                        "sources": ["x", "web"]
                     }
                 }
             ],
@@ -545,7 +546,8 @@ class GrokSearcher:
                 {
                     "type": "live_search",
                     "live_search": {
-                        "max_results": 20
+                        "max_results": 20,
+                        "sources": ["x", "web"]
                     }
                 }
             ],
@@ -619,7 +621,8 @@ class GrokSearcher:
                 {
                     "type": "live_search",
                     "live_search": {
-                        "max_results": 20
+                        "max_results": 20,
+                        "sources": ["x", "web"]
                     }
                 }
             ],
