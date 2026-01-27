@@ -442,15 +442,15 @@ class GrokSearcher:
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = "https://api.x.ai/v1/chat/completions"
+        url = "https://api.x.ai/v1/responses"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {GROK_API_KEY}"
         }
 
         payload = {
-            "model": "grok-4-1-fast",  # 검색 도구 지원 모델
-            "messages": [
+            "model": "grok-4-1-fast",
+            "input": [
                 {
                     "role": "system",
                     "content": "당신은 영화 소식 전문가입니다. X와 웹을 검색하여 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."
@@ -462,7 +462,11 @@ class GrokSearcher:
             ],
             "tools": [
                 {"type": "web_search"},
-                {"type": "x_search"}
+                {
+                    "type": "x_search",
+                    "from_date": yesterday,
+                    "to_date": today
+                }
             ],
             "temperature": 0.7
         }
@@ -493,15 +497,15 @@ class GrokSearcher:
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = "https://api.x.ai/v1/chat/completions"
+        url = "https://api.x.ai/v1/responses"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {GROK_API_KEY}"
         }
 
         payload = {
-            "model": "grok-4-1-fast",  # 검색 도구 지원 모델
-            "messages": [
+            "model": "grok-4-1-fast",
+            "input": [
                 {
                     "role": "system",
                     "content": """당신은 엔터테인먼트 뉴스 전문가입니다. X와 웹을 검색하여 실시간 뉴스를 찾습니다.
@@ -539,7 +543,11 @@ class GrokSearcher:
             ],
             "tools": [
                 {"type": "web_search"},
-                {"type": "x_search"}
+                {
+                    "type": "x_search",
+                    "from_date": yesterday,
+                    "to_date": today
+                }
             ],
             "temperature": 0.7
         }
@@ -595,21 +603,25 @@ class GrokSearcher:
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = "https://api.x.ai/v1/chat/completions"
+        url = "https://api.x.ai/v1/responses"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {GROK_API_KEY}"
         }
 
         payload = {
-            "model": "grok-4-1-fast",  # 검색 도구 지원 모델
-            "messages": [
+            "model": "grok-4-1-fast",
+            "input": [
                 {"role": "system", "content": prompts["system"]},
                 {"role": "user", "content": prompts["query"]}
             ],
             "tools": [
                 {"type": "web_search"},
-                {"type": "x_search"}
+                {
+                    "type": "x_search",
+                    "from_date": yesterday,
+                    "to_date": today
+                }
             ],
             "temperature": 0.7
         }
