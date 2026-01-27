@@ -463,9 +463,9 @@ class GrokSearcher:
             "tools": [
                 {
                     "type": "live_search",
+                    "sources": [{"type": "x"}, {"type": "web"}],
                     "live_search": {
-                        "max_results": 20,
-                        "sources": [{"type": "x"}, {"type": "web"}]
+                        "max_results": 20
                     }
                 }
             ],
@@ -545,9 +545,9 @@ class GrokSearcher:
             "tools": [
                 {
                     "type": "live_search",
+                    "sources": [{"type": "x"}, {"type": "web"}],
                     "live_search": {
-                        "max_results": 20,
-                        "sources": [{"type": "x"}, {"type": "web"}]
+                        "max_results": 20
                     }
                 }
             ],
@@ -620,9 +620,9 @@ class GrokSearcher:
             "tools": [
                 {
                     "type": "live_search",
+                    "sources": [{"type": "x"}, {"type": "web"}],
                     "live_search": {
-                        "max_results": 20,
-                        "sources": [{"type": "x"}, {"type": "web"}]
+                        "max_results": 20
                     }
                 }
             ],
