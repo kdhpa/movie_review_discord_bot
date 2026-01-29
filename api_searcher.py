@@ -556,8 +556,25 @@ class GrokSearcher:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    content = data.get("output", [{}])[0].get("content", "")
-                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() 응답 수신")
+                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() 전체 응답 키: {list(data.keys())}")
+                    output = data.get("output", [])
+                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output 타입: {type(output)}, 길이: {len(output) if isinstance(output, list) else 'N/A'}")
+
+                    # output 배열에서 message 타입 찾기 (tools 사용 시 여러 타입이 섞여 있음)
+                    content = ""
+                    for i, item in enumerate(output):
+                        if isinstance(item, dict):
+                            item_type = item.get("type", "")
+                            print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output[{i}] type: {item_type}")
+                            # message 타입이거나 content가 있는 항목 찾기
+                            if item_type == "message" or (item.get("content") and not content):
+                                content = item.get("content", "")
+                                if content:
+                                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output[{i}]에서 content 발견, 길이: {len(content)}")
+                                    break
+
+                    if not content:
+                        print(f"[WARNING] GrokSearcher.fetch_categorized_news() output에서 content를 찾지 못함")
 
                     # JSON 파싱 시도
                     try:
@@ -631,8 +648,26 @@ class GrokSearcher:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    content = data.get("output", [{}])[0].get("content", "")
-                    print(f"[DEBUG] _fetch_news_group({group}) 응답 수신")
+                    print(f"[DEBUG] _fetch_news_group({group}) 전체 응답 키: {list(data.keys())}")
+                    output = data.get("output", [])
+                    print(f"[DEBUG] _fetch_news_group({group}) output 길이: {len(output)}")
+
+                    # output 배열에서 message 타입 찾기 (tools 사용 시 여러 타입이 섞여 있음)
+                    content = ""
+                    for i, item in enumerate(output):
+                        if isinstance(item, dict):
+                            item_type = item.get("type", "")
+                            print(f"[DEBUG] _fetch_news_group({group}) output[{i}] type: {item_type}")
+                            # message 타입이거나 content가 있는 항목 찾기
+                            if item_type == "message" or (item.get("content") and not content):
+                                content = item.get("content", "")
+                                if content:
+                                    print(f"[DEBUG] _fetch_news_group({group}) output[{i}]에서 content 발견, 길이: {len(content)}")
+                                    break
+
+                    if not content:
+                        print(f"[WARNING] _fetch_news_group({group}) output에서 content를 찾지 못함")
+                        return {}
 
                     # JSON 파싱
                     try:
