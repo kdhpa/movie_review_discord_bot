@@ -566,9 +566,17 @@ class GrokSearcher:
                         if isinstance(item, dict):
                             item_type = item.get("type", "")
                             print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output[{i}] type: {item_type}")
-                            # message 타입이거나 content가 있는 항목 찾기
-                            if item_type == "message" or (item.get("content") and not content):
-                                content = item.get("content", "")
+                            # message 타입 찾기
+                            if item_type == "message":
+                                raw_content = item.get("content", "")
+                                # content가 리스트인 경우 (Grok responses API 형식)
+                                if isinstance(raw_content, list):
+                                    for c in raw_content:
+                                        if isinstance(c, dict) and c.get("type") == "text":
+                                            content = c.get("text", "")
+                                            break
+                                else:
+                                    content = raw_content
                                 if content:
                                     print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output[{i}]에서 content 발견, 길이: {len(content)}")
                                     break
@@ -658,9 +666,17 @@ class GrokSearcher:
                         if isinstance(item, dict):
                             item_type = item.get("type", "")
                             print(f"[DEBUG] _fetch_news_group({group}) output[{i}] type: {item_type}")
-                            # message 타입이거나 content가 있는 항목 찾기
-                            if item_type == "message" or (item.get("content") and not content):
-                                content = item.get("content", "")
+                            # message 타입 찾기
+                            if item_type == "message":
+                                raw_content = item.get("content", "")
+                                # content가 리스트인 경우 (Grok responses API 형식)
+                                if isinstance(raw_content, list):
+                                    for c in raw_content:
+                                        if isinstance(c, dict) and c.get("type") == "text":
+                                            content = c.get("text", "")
+                                            break
+                                else:
+                                    content = raw_content
                                 if content:
                                     print(f"[DEBUG] _fetch_news_group({group}) output[{i}]에서 content 발견, 길이: {len(content)}")
                                     break
