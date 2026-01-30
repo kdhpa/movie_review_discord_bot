@@ -441,92 +441,92 @@ class GrokSearcher:
     """Grok AI API를 통해 영화 소식을 가져오는 클래스"""
 
     @staticmethod
-    async def fetch_movie_news(session):
-        """Grok API를 호출하여 영화 루머/소식 가져오기 - 실시간 X/웹 검색 지원"""
+    def _fetch_movie_news_sync():
+        """동기 함수 - xai-sdk 호출 (별도 스레드에서 실행됨)"""
         if not GROK_API_KEY:
             print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
             return None
 
-        # 날짜 계산 (어제~오늘)
-        today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        # 날짜 계산 (어제~오늘) - datetime 객체로 전달
+        today = datetime.now()
+        yesterday = datetime.now() - timedelta(days=1)
 
-        url = "https://api.x.ai/v1/responses"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROK_API_KEY}"
-        }
+        client = Client(
+            api_key=GROK_API_KEY,
+            timeout=3600,
+        )
 
-        payload = {
-            "model": "grok-4-1-fast",
-            "input": [
-                {
-                    "role": "system",
-                    "content": "당신은 영화 소식 전문가입니다. X와 웹을 검색하여 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."
-                },
-                {
-                    "role": "user",
-                    "content": "X와 웹을 검색하여 오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처(URL 또는 X 계정)를 함께 알려주세요."
-                }
-            ],
-            "tools": [
-                {
-                    "type": "web_search",
-                    "from_date": yesterday,
-                    "to_date": today
-                },
-                {
-                    "type": "x_search",
-                    "from_date": yesterday,
-                    "to_date": today
-                }
-            ],
-            "temperature": 0.7
-        }
+        chat = client.chat.create(
+            model="grok-4",
+            tools=[
+                web_search(),
+                x_search(
+                    from_date=yesterday,
+                    to_date=today,
+                )
+            ]
+        )
+
+        # 시스템 메시지와 사용자 쿼리 추가
+        chat.append(system("당신은 영화 소식 전문가입니다. X와 웹을 검색하여 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."))
+        chat.append(user("X와 웹을 검색하여 오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처(URL 또는 X 계정)를 함께 알려주세요."))
 
         try:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    content = data.get("output", [{}])[0].get("content", "")
-                    print(f"[DEBUG] GrokSearcher.fetch_movie_news() 성공")
-                    return content
-                else:
-                    error_text = await response.text()
-                    print(f"[ERROR] GrokSearcher.fetch_movie_news() 실패 - 상태: {response.status}, 오류: {error_text}")
-                    return None
+            print(f"[DEBUG] _fetch_movie_news_sync() API 호출 시작")
+
+            # 스트리밍으로 응답 수집
+            content = ""
+            for response, chunk in chat.stream():
+                if chunk.content:
+                    content += chunk.content
+
+            print(f"[DEBUG] _fetch_movie_news_sync() 스트리밍 완료, 총 길이: {len(content)}")
+
+            if not content:
+                print(f"[WARNING] _fetch_movie_news_sync() 응답에서 content를 찾지 못함")
+                return None
+
+            return content
         except Exception as e:
-            print(f"[ERROR] GrokSearcher.fetch_movie_news() 예외 발생: {e}")
+            print(f"[ERROR] _fetch_movie_news_sync() 예외 발생: {e}")
             return None
 
     @staticmethod
-    async def fetch_categorized_news(session):
-        """카테고리별 엔터테인먼트 뉴스 가져오기 (JSON 형식) - 실시간 X/웹 검색 지원"""
+    async def fetch_movie_news(session):
+        """비동기 래퍼 - to_thread로 동기 함수 실행하여 이벤트 루프 차단 방지"""
+        return await asyncio.to_thread(GrokSearcher._fetch_movie_news_sync)
+
+    @staticmethod
+    def _fetch_categorized_news_sync():
+        """동기 함수 - xai-sdk 호출 (별도 스레드에서 실행됨)"""
         if not GROK_API_KEY:
             print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
             return None
 
-        # 날짜 계산 (어제~오늘)
-        today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        # 날짜 계산 (어제~오늘) - datetime 객체로 전달
+        today = datetime.now()
+        yesterday = datetime.now() - timedelta(days=1)
 
-        url = "https://api.x.ai/v1/responses"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROK_API_KEY}"
-        }
+        client = Client(
+            api_key=GROK_API_KEY,
+            timeout=3600,
+        )
 
-        payload = {
-            "model": "grok-4-1-fast",
-            "input": [
-                {
-                    "role": "system",
-                    "content": """당신은 엔터테인먼트 뉴스 전문가입니다. X와 웹을 검색하여 실시간 뉴스를 찾습니다.
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요."""
-                },
-                {
-                    "role": "user",
-                    "content": """X와 웹을 검색하여 오늘의 최신 엔터테인먼트 소식을 카테고리별로 정리해주세요.
+        chat = client.chat.create(
+            model="grok-4",
+            tools=[
+                web_search(),
+                x_search(
+                    from_date=yesterday,
+                    to_date=today,
+                )
+            ]
+        )
+
+        # 시스템 메시지와 사용자 쿼리 추가
+        chat.append(system("""당신은 엔터테인먼트 뉴스 전문가입니다. X와 웹을 검색하여 실시간 뉴스를 찾습니다.
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요."""))
+        chat.append(user("""X와 웹을 검색하여 오늘의 최신 엔터테인먼트 소식을 카테고리별로 정리해주세요.
 
 반드시 아래 JSON 형식으로 응답하세요:
 {
@@ -551,79 +551,51 @@ class GrokSearcher:
 - 드라마(drama): TV/OTT 드라마 소식
 - 애니(anime): 일본 애니메이션 소식
 - 만화(manga): 일본 만화 소식
-- 웹툰(webtoon): 한국 웹툰 소식"""
-                }
-            ],
-            "tools": [
-                {"type": "web_search"},
-                {
-                    "type": "x_search",
-                    "from_date": yesterday,
-                    "to_date": today
-                }
-            ],
-            "temperature": 0.7
-        }
+- 웹툰(webtoon): 한국 웹툰 소식"""))
 
         try:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() 전체 응답 키: {list(data.keys())}")
-                    output = data.get("output", [])
-                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output 타입: {type(output)}, 길이: {len(output) if isinstance(output, list) else 'N/A'}")
+            print(f"[DEBUG] _fetch_categorized_news_sync() API 호출 시작")
 
-                    # output 배열에서 message 타입 찾기 (tools 사용 시 여러 타입이 섞여 있음)
-                    content = ""
-                    for i, item in enumerate(output):
-                        if isinstance(item, dict):
-                            item_type = item.get("type", "")
-                            print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output[{i}] type: {item_type}")
-                            # message 타입 찾기
-                            if item_type == "message":
-                                raw_content = item.get("content", "")
-                                # content가 리스트인 경우 (Grok responses API 형식)
-                                if isinstance(raw_content, list):
-                                    for c in raw_content:
-                                        if isinstance(c, dict) and c.get("type") == "text":
-                                            content = c.get("text", "")
-                                            break
-                                else:
-                                    content = raw_content
-                                if content:
-                                    print(f"[DEBUG] GrokSearcher.fetch_categorized_news() output[{i}]에서 content 발견, 길이: {len(content)}")
-                                    break
+            # 스트리밍으로 응답 수집
+            content = ""
+            for response, chunk in chat.stream():
+                if chunk.content:
+                    content += chunk.content
 
-                    if not content:
-                        print(f"[WARNING] GrokSearcher.fetch_categorized_news() output에서 content를 찾지 못함")
+            print(f"[DEBUG] _fetch_categorized_news_sync() 스트리밍 완료, 총 길이: {len(content)}")
 
-                    # JSON 파싱 시도
-                    try:
-                        # JSON 블록 추출 (```json ... ``` 형식일 경우 처리)
-                        if "```json" in content:
-                            json_start = content.find("```json") + 7
-                            json_end = content.find("```", json_start)
-                            content = content[json_start:json_end].strip()
-                        elif "```" in content:
-                            json_start = content.find("```") + 3
-                            json_end = content.find("```", json_start)
-                            content = content[json_start:json_end].strip()
+            if not content:
+                print(f"[WARNING] _fetch_categorized_news_sync() 응답에서 content를 찾지 못함")
+                return None
 
-                        news_data = json.loads(content)
-                        print(f"[DEBUG] GrokSearcher.fetch_categorized_news() JSON 파싱 성공")
-                        return news_data
-                    except json.JSONDecodeError as e:
-                        print(f"[WARNING] JSON 파싱 실패: {e}")
-                        print(f"[DEBUG] 원본 응답: {content[:500]}...")
-                        # 폴백: 기존 방식으로 raw_content 반환
-                        return {"raw_content": content}
-                else:
-                    error_text = await response.text()
-                    print(f"[ERROR] GrokSearcher.fetch_categorized_news() 실패 - 상태: {response.status}, 오류: {error_text}")
-                    return None
+            # JSON 파싱 시도
+            try:
+                # JSON 블록 추출 (```json ... ``` 형식일 경우 처리)
+                if "```json" in content:
+                    json_start = content.find("```json") + 7
+                    json_end = content.find("```", json_start)
+                    content = content[json_start:json_end].strip()
+                elif "```" in content:
+                    json_start = content.find("```") + 3
+                    json_end = content.find("```", json_start)
+                    content = content[json_start:json_end].strip()
+
+                news_data = json.loads(content)
+                print(f"[DEBUG] _fetch_categorized_news_sync() JSON 파싱 성공")
+                return news_data
+            except json.JSONDecodeError as e:
+                print(f"[WARNING] JSON 파싱 실패: {e}")
+                print(f"[DEBUG] 원본 응답: {content[:500]}...")
+                # 폴백: 기존 방식으로 raw_content 반환
+                return {"raw_content": content}
         except Exception as e:
-            print(f"[ERROR] GrokSearcher.fetch_categorized_news() 예외 발생: {e}")
+            print(f"[ERROR] _fetch_categorized_news_sync() 예외 발생: {e}")
             return None
+
+    @staticmethod
+    async def fetch_categorized_news(session):
+        """비동기 래퍼 - to_thread로 동기 함수 실행하여 이벤트 루프 차단 방지"""
+        return await asyncio.to_thread(GrokSearcher._fetch_categorized_news_sync)
 
     @staticmethod
     def _fetch_news_group_sync(group: str):
@@ -649,11 +621,10 @@ class GrokSearcher:
         chat = client.chat.create(
             model="grok-4",
             tools=[
-                {
-                    "type": "web_search",
-                    "from_date": yesterday,
-                    "to_date": today
-                },
+                web_search(
+                    from_date=yesterday,
+                    to_date=today,
+                ),
                 x_search(
                     from_date=yesterday,
                     to_date=today,
