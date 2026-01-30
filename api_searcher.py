@@ -15,7 +15,7 @@ translator = Translator()
 # 그룹별 뉴스 프롬프트 정의 (실시간 X/웹 검색용)
 NEWS_GROUP_PROMPTS = {
     "movie": {
-        "system": "당신은 영화 뉴스 속보 전문 기자입니다. X(트위터)와 웹에서 실시간 검색하여 방금 발표된 영화 소식과 루머를 찾습니다.",
+        "system": "당신은 영화 뉴스 속보 전문 기자입니다. X(트위터)와 웹에서 실시간 검색하여 방금 발표된 영화 소식과 루머를 찾습니다. 모든 응답은 반드시 한국어로 번역해서 작성하세요.",
         "query": """X와 웹을 검색하여 지금 막 화제가 되고 있는 영화 뉴스와 루머 2-3개를 찾아주세요.
 
 검색 대상:
@@ -23,10 +23,12 @@ NEWS_GROUP_PROMPTS = {
 - 흥행 기록, 제작 소식, 업계 루머
 
 반드시 아래 JSON 형식으로만 응답:
-{"movie": [{"title": "제목", "content": "내용 2-3문장", "source": "출처 URL 또는 X 계정"}]}"""
+{"movie": [{"title": "제목", "content": "내용 2-3문장", "source": "출처 URL 또는 X 계정"}]}
+
+중요: 영어 소스라도 제목과 내용을 반드시 한국어로 번역해서 응답하세요."""
     },
     "drama": {
-        "system": "당신은 드라마/TV시리즈 속보 전문 기자입니다. X와 웹에서 실시간 검색하여 방금 발표된 드라마 소식을 찾습니다.",
+        "system": "당신은 드라마/TV시리즈 속보 전문 기자입니다. X와 웹에서 실시간 검색하여 방금 발표된 드라마 소식을 찾습니다. 모든 응답은 반드시 한국어로 번역해서 작성하세요.",
         "query": """X와 웹을 검색하여 지금 막 화제가 되고 있는 드라마 뉴스 2-3개를 찾아주세요.
 
 검색 대상:
@@ -34,10 +36,12 @@ NEWS_GROUP_PROMPTS = {
 - 신작 공개, 캐스팅, 시청률 기록, 시즌 발표
 
 반드시 아래 JSON 형식으로만 응답:
-{"drama": [{"title": "제목", "content": "내용 2-3문장", "source": "출처"}]}"""
+{"drama": [{"title": "제목", "content": "내용 2-3문장", "source": "출처"}]}
+
+중요: 영어 소스라도 제목과 내용을 반드시 한국어로 번역해서 응답하세요."""
     },
     "acg": {
-        "system": "당신은 애니메이션/만화/웹툰 속보 전문 기자입니다. X와 웹에서 실시간 검색하여 방금 발표된 소식을 찾습니다.",
+        "system": "당신은 애니메이션/만화/웹툰 속보 전문 기자입니다. X와 웹에서 실시간 검색하여 방금 발표된 소식을 찾습니다. 모든 응답은 반드시 한국어로 번역해서 작성하세요.",
         "query": """X와 웹을 검색하여 지금 막 화제가 되고 있는 애니/만화/웹툰 뉴스를 찾아주세요.
 
 검색 대상:
@@ -51,7 +55,9 @@ NEWS_GROUP_PROMPTS = {
   "anime": [{"title": "제목", "content": "내용", "source": "출처"}],
   "manga": [{"title": "제목", "content": "내용", "source": "출처"}],
   "webtoon": [{"title": "제목", "content": "내용", "source": "출처"}]
-}"""
+}
+
+중요: 영어/일본어 소스라도 제목과 내용을 반드시 한국어로 번역해서 응답하세요."""
     }
 }
 
@@ -464,7 +470,11 @@ class GrokSearcher:
                 }
             ],
             "tools": [
-                {"type": "web_search"},
+                {
+                    "type": "web_search",
+                    "from_date": yesterday,
+                    "to_date": today
+                },
                 {
                     "type": "x_search",
                     "from_date": yesterday,
@@ -639,7 +649,11 @@ class GrokSearcher:
         chat = client.chat.create(
             model="grok-4",
             tools=[
-                web_search(),
+                {
+                    "type": "web_search",
+                    "from_date": yesterday,
+                    "to_date": today
+                },
                 x_search(
                     from_date=yesterday,
                     to_date=today,
@@ -659,7 +673,6 @@ class GrokSearcher:
             for response, chunk in chat.stream():
                 if chunk.content:
                     content += chunk.content
-                    print(f"[STREAM] {group}: {chunk.content[:50]}..." if len(chunk.content) > 50 else f"[STREAM] {group}: {chunk.content}")
 
             print(f"[DEBUG] _fetch_news_group_sync({group}) 스트리밍 완료, 총 길이: {len(content)}")
 
