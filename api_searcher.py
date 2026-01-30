@@ -632,7 +632,7 @@ class GrokSearcher:
         yesterday = datetime.now() - timedelta(days=1)
 
         client = Client(
-            api_key=os.getenv("XAI_API_KEY"),
+            api_key=GROK_API_KEY,
             timeout=3600,
         )
 
