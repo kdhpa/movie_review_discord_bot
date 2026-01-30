@@ -648,18 +648,18 @@ class GrokSearcher:
         )
 
         # 시스템 메시지와 사용자 쿼리 추가
-        chat.add(system(prompts["system"]))
-        chat.add(user(prompts["query"]))
+        chat.append(system(prompts["system"]))
+        chat.append(user(prompts["query"]))
 
         try:
             print(f"[DEBUG] _fetch_news_group({group}) API 호출 시작")
 
             # 스트리밍으로 응답 수집
             content = ""
-            for event in chat.stream():
-                if hasattr(event, 'text'):
-                    content += event.text
-                    print(f"[STREAM] {group}: {event.text[:50]}..." if len(event.text) > 50 else f"[STREAM] {group}: {event.text}")
+            for response, chunk in chat.stream():
+                if chunk.content:
+                    content += chunk.content
+                    print(f"[STREAM] {group}: {chunk.content[:50]}..." if len(chunk.content) > 50 else f"[STREAM] {group}: {chunk.content}")
 
             print(f"[DEBUG] _fetch_news_group({group}) 스트리밍 완료, 총 길이: {len(content)}")
 
