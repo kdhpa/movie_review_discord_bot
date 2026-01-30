@@ -616,8 +616,8 @@ class GrokSearcher:
             return None
 
     @staticmethod
-    async def _fetch_news_group(session, group: str):
-        """특정 그룹의 뉴스 가져오기 (movie, drama, acg) - 실시간 X/웹 검색 지원"""
+    def _fetch_news_group_sync(group: str):
+        """동기 함수 - xai-sdk 호출 (별도 스레드에서 실행됨)"""
         if not GROK_API_KEY:
             print(f"[ERROR] GROK_API_KEY가 설정되지 않았습니다. (group: {group})")
             return {}
@@ -652,7 +652,7 @@ class GrokSearcher:
         chat.append(user(prompts["query"]))
 
         try:
-            print(f"[DEBUG] _fetch_news_group({group}) API 호출 시작")
+            print(f"[DEBUG] _fetch_news_group_sync({group}) API 호출 시작")
 
             # 스트리밍으로 응답 수집
             content = ""
@@ -661,10 +661,10 @@ class GrokSearcher:
                     content += chunk.content
                     print(f"[STREAM] {group}: {chunk.content[:50]}..." if len(chunk.content) > 50 else f"[STREAM] {group}: {chunk.content}")
 
-            print(f"[DEBUG] _fetch_news_group({group}) 스트리밍 완료, 총 길이: {len(content)}")
+            print(f"[DEBUG] _fetch_news_group_sync({group}) 스트리밍 완료, 총 길이: {len(content)}")
 
             if not content:
-                print(f"[WARNING] _fetch_news_group({group}) 응답에서 content를 찾지 못함")
+                print(f"[WARNING] _fetch_news_group_sync({group}) 응답에서 content를 찾지 못함")
                 return {}
 
             # JSON 파싱
@@ -680,15 +680,20 @@ class GrokSearcher:
                     content = content[json_start:json_end].strip()
 
                 news_data = json.loads(content)
-                print(f"[DEBUG] _fetch_news_group({group}) JSON 파싱 성공: {list(news_data.keys())}")
+                print(f"[DEBUG] _fetch_news_group_sync({group}) JSON 파싱 성공: {list(news_data.keys())}")
                 return news_data
             except json.JSONDecodeError as e:
-                print(f"[WARNING] _fetch_news_group({group}) JSON 파싱 실패: {e}")
+                print(f"[WARNING] _fetch_news_group_sync({group}) JSON 파싱 실패: {e}")
                 print(f"[DEBUG] 원본 응답: {content[:300]}...")
                 return {}
         except Exception as e:
-            print(f"[ERROR] _fetch_news_group({group}) 예외 발생: {e}")
+            print(f"[ERROR] _fetch_news_group_sync({group}) 예외 발생: {e}")
             return {}
+
+    @staticmethod
+    async def _fetch_news_group(session, group: str):
+        """비동기 래퍼 - to_thread로 동기 함수 실행하여 이벤트 루프 차단 방지"""
+        return await asyncio.to_thread(GrokSearcher._fetch_news_group_sync, group)
 
     @staticmethod
     def _generate_headlines(news_data: dict) -> list:
