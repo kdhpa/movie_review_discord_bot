@@ -2,6 +2,9 @@ import os
 import re
 import json
 import asyncio
+from xai_sdk import Client
+from xai_sdk.chat import user, system
+from xai_sdk.tools import web_search, x_search
 from datetime import datetime, timedelta
 from googletrans import Translator
 
@@ -624,90 +627,65 @@ class GrokSearcher:
             print(f"[ERROR] 알 수 없는 그룹: {group}")
             return {}
 
-        # 날짜 계산 (어제~오늘)
-        today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        # 날짜 계산 (어제~오늘) - datetime 객체로 전달
+        today = datetime.now()
+        yesterday = datetime.now() - timedelta(days=1)
 
-        url = "https://api.x.ai/v1/responses"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROK_API_KEY}"
-        }
+        client = Client(
+            api_key=os.getenv("XAI_API_KEY"),
+            timeout=3600,
+        )
 
-        payload = {
-            "model": "grok-4-1-fast",
-            "input": [
-                {"role": "system", "content": prompts["system"]},
-                {"role": "user", "content": prompts["query"]}
-            ],
-            "tools": [
-                {"type": "web_search"},
-                {
-                    "type": "x_search",
-                    "from_date": yesterday,
-                    "to_date": today
-                }
-            ],
-            "temperature": 0.7
-        }
+        chat = client.chat.create(
+            model="grok-4",
+            tools=[
+                web_search(),
+                x_search(
+                    from_date=yesterday,
+                    to_date=today,
+                )
+            ]
+        )
+
+        # 시스템 메시지와 사용자 쿼리 추가
+        chat.add(system(prompts["system"]))
+        chat.add(user(prompts["query"]))
 
         try:
             print(f"[DEBUG] _fetch_news_group({group}) API 호출 시작")
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    print(f"[DEBUG] _fetch_news_group({group}) 전체 응답 키: {list(data.keys())}")
-                    output = data.get("output", [])
-                    print(f"[DEBUG] _fetch_news_group({group}) output 길이: {len(output)}")
 
-                    # output 배열에서 message 타입 찾기 (tools 사용 시 여러 타입이 섞여 있음)
-                    content = ""
-                    for i, item in enumerate(output):
-                        if isinstance(item, dict):
-                            item_type = item.get("type", "")
-                            print(f"[DEBUG] _fetch_news_group({group}) output[{i}] type: {item_type}")
-                            # message 타입 찾기
-                            if item_type == "message":
-                                raw_content = item.get("content", "")
-                                # content가 리스트인 경우 (Grok responses API 형식)
-                                if isinstance(raw_content, list):
-                                    for c in raw_content:
-                                        if isinstance(c, dict) and c.get("type") == "text":
-                                            content = c.get("text", "")
-                                            break
-                                else:
-                                    content = raw_content
-                                if content:
-                                    print(f"[DEBUG] _fetch_news_group({group}) output[{i}]에서 content 발견, 길이: {len(content)}")
-                                    break
+            # 스트리밍으로 응답 수집
+            content = ""
+            for event in chat.stream():
+                if hasattr(event, 'text'):
+                    content += event.text
+                    print(f"[STREAM] {group}: {event.text[:50]}..." if len(event.text) > 50 else f"[STREAM] {group}: {event.text}")
 
-                    if not content:
-                        print(f"[WARNING] _fetch_news_group({group}) output에서 content를 찾지 못함")
-                        return {}
+            print(f"[DEBUG] _fetch_news_group({group}) 스트리밍 완료, 총 길이: {len(content)}")
 
-                    # JSON 파싱
-                    try:
-                        # JSON 블록 추출 (```json ... ``` 형식일 경우 처리)
-                        if "```json" in content:
-                            json_start = content.find("```json") + 7
-                            json_end = content.find("```", json_start)
-                            content = content[json_start:json_end].strip()
-                        elif "```" in content:
-                            json_start = content.find("```") + 3
-                            json_end = content.find("```", json_start)
-                            content = content[json_start:json_end].strip()
+            if not content:
+                print(f"[WARNING] _fetch_news_group({group}) 응답에서 content를 찾지 못함")
+                return {}
 
-                        news_data = json.loads(content)
-                        print(f"[DEBUG] _fetch_news_group({group}) JSON 파싱 성공: {list(news_data.keys())}")
-                        return news_data
-                    except json.JSONDecodeError as e:
-                        print(f"[WARNING] _fetch_news_group({group}) JSON 파싱 실패: {e}")
-                        print(f"[DEBUG] 원본 응답: {content[:300]}...")
-                        return {}
-                else:
-                    error_text = await response.text()
-                    print(f"[ERROR] _fetch_news_group({group}) 실패 - 상태: {response.status}, 오류: {error_text}")
-                    return {}
+            # JSON 파싱
+            try:
+                # JSON 블록 추출 (```json ... ``` 형식일 경우 처리)
+                if "```json" in content:
+                    json_start = content.find("```json") + 7
+                    json_end = content.find("```", json_start)
+                    content = content[json_start:json_end].strip()
+                elif "```" in content:
+                    json_start = content.find("```") + 3
+                    json_end = content.find("```", json_start)
+                    content = content[json_start:json_end].strip()
+
+                news_data = json.loads(content)
+                print(f"[DEBUG] _fetch_news_group({group}) JSON 파싱 성공: {list(news_data.keys())}")
+                return news_data
+            except json.JSONDecodeError as e:
+                print(f"[WARNING] _fetch_news_group({group}) JSON 파싱 실패: {e}")
+                print(f"[DEBUG] 원본 응답: {content[:300]}...")
+                return {}
         except Exception as e:
             print(f"[ERROR] _fetch_news_group({group}) 예외 발생: {e}")
             return {}
