@@ -165,24 +165,6 @@ class Database:
             print(f"❌ Failed to get content stats: {e}")
             return None
 
-    def get_all_reviews(self, limit=50):
-        """전체 리뷰 히스토리"""
-        try:
-            with get_conn() as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-                    cursor.execute('''
-                        SELECT * FROM reviews
-                        ORDER BY created_at DESC
-                        LIMIT %s
-                    ''', (limit,))
-
-                    reviews = cursor.fetchall()
-                    return reviews
-        except Exception as e:
-            print(f"❌ Failed to get all reviews: {e}")
-            return []
-        
     def delete_review(self, user_id, title, category=None):
         """유저의 특정 콘텐츠 리뷰 삭제"""
         try:
@@ -207,9 +189,3 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to delete review: {e}")
             return False
-
-    def close(self):
-        """DB 연결 종료"""
-        if self.conn:
-            self.conn.close()
-            print("Database connection closed")

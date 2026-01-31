@@ -159,37 +159,6 @@ class ContentSearcher:
         return None, None, None, None, None
 
     @staticmethod
-    async def search_tmdb(session, name):
-        print(f"[DEBUG] search_tmdb() 시작 - name: {name}")
-
-        # 1차: 직접 검색
-        print(f"[DEBUG] search_tmdb() [1차] TMDB 직접 검색 시도...")
-        result = await ContentSearcher._search_tmdb_direct(session, name)
-
-        # 검색 성공 시 반환
-        if result[0] is not None:
-            print(f"[DEBUG] search_tmdb() [1차] 성공 - 반환: title={result[0]}, year={result[1]}, director={result[2]}, category={result[4]}")
-            return result
-
-        print(f"[DEBUG] search_tmdb() [1차] 실패")
-
-        # 3차: 번역 후 재검색
-        print(f"[DEBUG] search_tmdb() [2차] 영문 번역 시도...")
-        translated = await translate_to_english(name)
-        if translated and translated != name:
-            print(f"[DEBUG] search_tmdb() [3차] 번역 성공: {translated} -> TMDB 재검색...")
-            result = await ContentSearcher._search_tmdb_direct(session, translated)
-            if result[0] is not None:
-                print(f"[DEBUG] search_tmdb() [3차] 성공 - 반환: title={result[0]}, year={result[1]}, director={result[2]}, category={result[4]}")
-                return result
-            print(f"[DEBUG] search_tmdb() [3차] TMDB 재검색 실패")
-        else:
-            print(f"[DEBUG] search_tmdb() [3차] 번역 실패 또는 동일: {translated}")
-
-        print(f"[DEBUG] search_tmdb() 완료 - 반환값 없음")
-        return None, None, None, None, None
-
-    @staticmethod
     async def _search_tmdb_multi_direct(session, name):
         """TMDB에서 최대 5개 결과 검색 (내부용)"""
         search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}&language=ko-KR"
@@ -439,62 +408,6 @@ class ContentSearcher:
 
 class GrokSearcher:
     """Grok AI API를 통해 영화 소식을 가져오는 클래스"""
-
-    @staticmethod
-    def _fetch_movie_news_sync():
-        """동기 함수 - xai-sdk 호출 (별도 스레드에서 실행됨)"""
-        if not GROK_API_KEY:
-            print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
-            return None
-
-        # 날짜 계산 (어제~오늘) - datetime 객체로 전달
-        today = datetime.now()
-        yesterday = datetime.now() - timedelta(days=1)
-
-        client = Client(
-            api_key=GROK_API_KEY,
-            timeout=3600,
-        )
-
-        chat = client.chat.create(
-            model="grok-4",
-            tools=[
-                web_search(),
-                x_search(
-                    from_date=yesterday,
-                    to_date=today,
-                )
-            ]
-        )
-
-        # 시스템 메시지와 사용자 쿼리 추가
-        chat.append(system("당신은 영화 소식 전문가입니다. X와 웹을 검색하여 최신 영화 루머, 제작 소식, 캐스팅 뉴스 등을 한국어로 알려주세요."))
-        chat.append(user("X와 웹을 검색하여 오늘의 최신 영화 루머와 소식 3-5개를 알려주세요. 각 소식은 제목과 간단한 설명으로 구성해주세요. 출처(URL 또는 X 계정)를 함께 알려주세요."))
-
-        try:
-            print(f"[DEBUG] _fetch_movie_news_sync() API 호출 시작")
-
-            # 스트리밍으로 응답 수집
-            content = ""
-            for response, chunk in chat.stream():
-                if chunk.content:
-                    content += chunk.content
-
-            print(f"[DEBUG] _fetch_movie_news_sync() 스트리밍 완료, 총 길이: {len(content)}")
-
-            if not content:
-                print(f"[WARNING] _fetch_movie_news_sync() 응답에서 content를 찾지 못함")
-                return None
-
-            return content
-        except Exception as e:
-            print(f"[ERROR] _fetch_movie_news_sync() 예외 발생: {e}")
-            return None
-
-    @staticmethod
-    async def fetch_movie_news(session):
-        """비동기 래퍼 - to_thread로 동기 함수 실행하여 이벤트 루프 차단 방지"""
-        return await asyncio.to_thread(GrokSearcher._fetch_movie_news_sync)
 
     @staticmethod
     def _fetch_categorized_news_sync():
