@@ -2,57 +2,90 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication Rules
+
+- **Always explain in Korean** - All explanations, descriptions, and responses must be in Korean
+- **Code-related content in English** - Variable names, function names, comments in code, commit messages, and technical terms should remain in English
+
 ## Project Overview
 
-This is a Discord bot for managing movie/media reviews. Users can write and manage reviews for movies, dramas, anime, manga, and webtoons via Discord slash commands. Reviews are stored in PostgreSQL with automatic content lookup via external APIs.
+A Discord bot for content reviews (movies, dramas, anime, manga, webtoons) using slash commands. Reviews are stored in PostgreSQL (Supabase). Also includes a daily entertainment news scheduler using Grok AI.
 
 ## Running the Bot
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the bot
 python piacia.py
 ```
 
-## Required Environment Variables
-
+**Required environment variables:**
 - `Token` - Discord bot token
-- `TMDB_API` - TMDB API key
-- `DATABASE_URL` - PostgreSQL connection string (format: `postgres://user:password@host:port/dbname`)
+- `DATABASE_URL` - PostgreSQL connection string (Supabase)
+- `TMDB_API` - TMDB API key for movie/drama/anime search
+- `GROK_API_KEY` - Grok AI API key for news feature (optional)
+- `NEWS_CHANNEL_ID` - Discord channel ID for daily news (optional)
 
-## Architecture
+## Code Architecture
 
-### File Structure
+### Core Components
 
-- **piacia.py** - Main entry point with Discord bot class, slash commands, and UI components
-- **api_searcher.py** - External API integration (TMDB, MangaDex, Naver Webtoon) with Google Translate
-- **database.py** - PostgreSQL operations and schema management
-- **review_form.py** - Discord message templates for different content types
-
-### Content Categories
-
-The bot handles 5 content types with different API sources:
-- **Movies/Dramas/Anime** - TMDB API (anime detected by genre ID 16)
-- **Manga** - MangaDex API
-- **Webtoons** - Naver Webtoon API
+| File | Purpose |
+|------|---------|
+| `piacia.py` | Main entry: `MyBot` class, slash commands, `ReviewForm` modal, `MovieSelectView` |
+| `api_searcher.py` | `ContentSearcher` (TMDB/MangaDex/Naver), `GrokSearcher` (news via xai-sdk) |
+| `database.py` | `Database` class with psycopg2, auto-creates `reviews` table on init |
+| `news_scheduler.py` | `NewsScheduler` with discord.ext.tasks loop (13:00 KST daily) |
+| `review_form.py` | `MOVIE_FORM`, `MANGA_FORM`, `WEBTOON_FORM` templates |
 
 ### Slash Commands
 
-1. `/한줄평` - Write a review (triggers API search, shows selection menu if multiple results)
-2. `/내리뷰` - View user's recent reviews with optional category filtering
-3. `/통계` - Get aggregate statistics for specific content
-4. `/리뷰삭제` - Delete a review
+| Command | Description |
+|---------|-------------|
+| `/한줄평 [카테고리]` | Open review modal (tmdb/manga/webtoon) |
+| `/내리뷰 [카테고리]` | Show user's recent 5 reviews |
+| `/통계 [제목] [카테고리]` | Show content statistics |
+| `/리뷰삭제 [제목] [카테고리]` | Delete user's review |
+| `/뉴스` | Admin-only: Send daily news immediately |
 
-### Key Patterns
+### Key Flow: Review Submission
 
-- All external operations use async/await with aiohttp
-- ContentSearcher class centralizes API calls with automatic Korean translation
-- Database class uses connection pooling via context manager
-- UI uses Discord modals (ReviewForm) and select menus (MovieSelectView)
-- Score display uses moon phase emojis (0-5 scale)
+1. `/한줄평 [category]` → `ReviewForm` modal
+2. User submits: title, score (0-5), one-line review, optional comment
+3. Search by category:
+   - **tmdb**: `search_tmdb_multiple()` → multi-result select menu if >1 result
+   - **manga**: MangaDex API with Korean title priority
+   - **webtoon**: Naver Webtoon API
+4. `_save_and_send_review()`: duplicate check → DB save → format with template → send with poster
+
+### Category System
+
+Categories: `movie`, `drama`, `anime`, `manga`, `webtoon`
+
+- TMDB auto-detects category from media_type and genre (animation=anime, tv=drama)
+- Each category has emoji (`CATEGORY_EMOJI`) and Korean name (`CATEGORY_NAME`) mappings
+
+### News Scheduler Architecture
+
+`GrokSearcher.fetch_all_categorized_news()`:
+1. Parallel calls to 3 groups (movie, drama, acg) via `asyncio.gather`
+2. Each group uses xai-sdk with `web_search()` and `x_search()` tools
+3. Merges results into 5 categories + generates headlines
+4. `NewsScheduler` creates main embed + category buttons + discussion thread
 
 ### Database Schema
 
-Single `reviews` table with: user_id, username, movie_title, movie_year, director, score, one_line_review, additional_comment, category, created_at. Indices on user_id and movie_title.
+`reviews` table (auto-created on startup):
+```sql
+id SERIAL PRIMARY KEY,
+user_id BIGINT NOT NULL,
+username TEXT,
+movie_title TEXT NOT NULL,
+movie_year TEXT,
+director TEXT,
+score REAL NOT NULL,
+one_line_review TEXT NOT NULL,
+additional_comment TEXT,
+category TEXT DEFAULT 'movie',
+created_at TIMESTAMP DEFAULT NOW()
+```
+
+See [DB_SETUP.md](DB_SETUP.md) for Supabase setup.
