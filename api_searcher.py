@@ -24,6 +24,8 @@ NEWS_GROUP_PROMPTS = {
 - 신작 발표, 캐스팅 확정/루머, 티저/예고편 공개
 - 흥행 기록, 제작 소식, 업계 루머
 
+⚠️ 제외: 가수, 음악, 그래미, K-POP, 아이돌 관련 뉴스는 절대 포함하지 마세요
+
 반드시 아래 JSON 형식으로만 응답 (한국어로!):
 {"movie": [{"title": "한국어 제목", "content": "한국어 내용 2-3문장", "source": "출처"}]}
 
@@ -38,6 +40,8 @@ NEWS_GROUP_PROMPTS = {
 검색 대상:
 - 한국 드라마, OTT(넷플릭스/디즈니+/티빙), 미드
 - 신작 공개, 캐스팅, 시청률 기록, 시즌 발표
+
+⚠️ 제외: 가수, 음악, 그래미, K-POP, 아이돌 관련 뉴스는 절대 포함하지 마세요
 
 반드시 아래 JSON 형식으로만 응답 (한국어로!):
 {"drama": [{"title": "한국어 제목", "content": "한국어 내용 2-3문장", "source": "출처"}]}
@@ -55,6 +59,8 @@ NEWS_GROUP_PROMPTS = {
 - manga: 일본 만화 (연재, 완결, 작가 소식)
 - webtoon: 한국 웹툰 (네이버/카카오, 영상화, 작가)
 - 각 카테고리당 1-2개
+
+⚠️ 제외: 가수, 음악, 그래미, K-POP, 아이돌 관련 뉴스는 절대 포함하지 마세요
 
 반드시 아래 JSON 형식으로만 응답 (한국어로!):
 {
@@ -474,6 +480,7 @@ class GrokSearcher:
 - 만화(manga): 일본 만화 소식
 - 웹툰(webtoon): 한국 웹툰 소식
 
+⚠️ 제외: 가수, 음악, 그래미, K-POP, 아이돌 관련 뉴스는 포함하지 마세요
 ⚠️ 필수: 영어/일본어 뉴스도 반드시 한국어로 번역해서 title, content, summary 작성"""))
 
         try:
@@ -544,10 +551,7 @@ class GrokSearcher:
         chat = client.chat.create(
             model="grok-4",
             tools=[
-                web_search(
-                    from_date=yesterday,
-                    to_date=today,
-                ),
+                web_search(),
                 x_search(
                     from_date=yesterday,
                     to_date=today,
