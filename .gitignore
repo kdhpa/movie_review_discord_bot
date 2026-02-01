@@ -29,3 +29,12 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+
+# Documentation (CLAUDE.md 제외)
+*.md
+!CLAUDE.md
+!README.md
+
+# Claude Skills
+.claude/skills/
+*.skill

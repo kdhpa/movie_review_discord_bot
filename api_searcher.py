@@ -443,17 +443,19 @@ class GrokSearcher:
         )
 
         # 시스템 메시지와 사용자 쿼리 추가
-        chat.append(system("""당신은 엔터테인먼트 뉴스 전문가입니다. X와 웹을 검색하여 실시간 뉴스를 찾습니다.
+        chat.append(system("""You MUST respond ONLY in Korean (한국어). Never use English in your response.
+당신은 엔터테인먼트 뉴스 전문가입니다. X와 웹을 검색하여 실시간 뉴스를 찾습니다.
+⚠️ 중요: 모든 title, content, summary 필드는 반드시 한국어로 작성하세요.
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요."""))
         chat.append(user("""X와 웹을 검색하여 오늘의 최신 엔터테인먼트 소식을 카테고리별로 정리해주세요.
 
-반드시 아래 JSON 형식으로 응답하세요:
+반드시 아래 JSON 형식으로 응답하세요 (한국어로!):
 {
   "headlines": [
-    {"title": "헤드라인 제목", "summary": "한줄 요약", "category": "movie", "importance": 5}
+    {"title": "한국어 헤드라인 제목", "summary": "한국어 한줄 요약", "category": "movie", "importance": 5}
   ],
   "movie": [
-    {"title": "뉴스 제목", "content": "상세 내용 (2-3문장)", "source": "출처 URL 또는 X 계정"}
+    {"title": "한국어 뉴스 제목", "content": "한국어 상세 내용 (2-3문장)", "source": "출처 URL 또는 X 계정"}
   ],
   "drama": [...],
   "anime": [...],
@@ -470,7 +472,9 @@ class GrokSearcher:
 - 드라마(drama): TV/OTT 드라마 소식
 - 애니(anime): 일본 애니메이션 소식
 - 만화(manga): 일본 만화 소식
-- 웹툰(webtoon): 한국 웹툰 소식"""))
+- 웹툰(webtoon): 한국 웹툰 소식
+
+⚠️ 필수: 영어/일본어 뉴스도 반드시 한국어로 번역해서 title, content, summary 작성"""))
 
         try:
             print(f"[DEBUG] _fetch_categorized_news_sync() API 호출 시작")
@@ -642,6 +646,20 @@ class GrokSearcher:
                     if key in result:
                         news_data[key].extend(result[key])
 
+        # 결과 병합 후 한국어 번역 처리
+        print("[INFO] fetch_all_categorized_news() 한국어 번역 처리 시작")
+        for category in news_data.keys():
+            for item in news_data[category]:
+                # title 번역
+                if item.get("title") and not await is_korean(item["title"]):
+                    print(f"[DEBUG] 번역 필요 (title): {item['title'][:30]}...")
+                    item["title"] = await translate_to_korean(item["title"])
+                # content 번역
+                if item.get("content") and not await is_korean(item["content"]):
+                    print(f"[DEBUG] 번역 필요 (content): {item['content'][:30]}...")
+                    item["content"] = await translate_to_korean(item["content"])
+        print("[INFO] fetch_all_categorized_news() 한국어 번역 처리 완료")
+
         # 뉴스가 하나도 없으면 폴백
         total_news = sum(len(v) for v in news_data.values())
         if total_news == 0:
@@ -650,6 +668,13 @@ class GrokSearcher:
 
         # 헤드라인 생성
         news_data["headlines"] = GrokSearcher._generate_headlines(news_data)
+
+        # 헤드라인 한국어 번역 처리
+        for headline in news_data.get("headlines", []):
+            if headline.get("title") and not await is_korean(headline["title"]):
+                headline["title"] = await translate_to_korean(headline["title"])
+            if headline.get("summary") and not await is_korean(headline["summary"]):
+                headline["summary"] = await translate_to_korean(headline["summary"])
 
         print(f"[INFO] fetch_all_categorized_news() 완료 - 총 {total_news}개 뉴스")
         return news_data
