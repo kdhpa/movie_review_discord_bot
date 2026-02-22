@@ -111,7 +111,7 @@ class AssistantService:
 
         try:
             genai.configure(api_key=api_key)
-            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
             print("[AssistantService] Gemini API initialized successfully")
             return True
         except Exception as e:

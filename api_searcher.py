@@ -286,6 +286,85 @@ class ContentSearcher:
             return "정보 없음"
 
     @staticmethod
+    def _extract_mangadex_id(url_or_name):
+        """MangaDex URL에서 manga ID 추출 (UUID 형식)"""
+        # https://mangadex.org/title/{uuid}/{slug} 형식
+        pattern = r'mangadex\.org/title/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})'
+        match = re.search(pattern, url_or_name, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    async def _fetch_manga_by_id(session, manga_id):
+        """MangaDex ID로 직접 만화 정보 조회"""
+        url = f"https://api.mangadex.org/manga/{manga_id}?includes[]=author&includes[]=cover_art"
+
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    print(f"❌ MangaDex API error: status {response.status}")
+                    return None, None, None, None
+
+                data = await response.json()
+
+            manga = data.get('data')
+            if not manga:
+                return None, None, None, None
+
+            attributes = manga.get('attributes', {})
+            title_dict = attributes.get('title', {})
+            alt_titles = attributes.get('altTitles', [])
+
+            title = None
+            # 1. title 객체에서 한국어 제목 찾기
+            if 'ko' in title_dict:
+                title = title_dict['ko']
+
+            # 2. altTitles에서 한국어 제목 찾기
+            if not title:
+                for alt in alt_titles:
+                    if 'ko' in alt:
+                        title = alt['ko']
+                        break
+
+            # 3. title 객체에서 영어 제목 찾기
+            if not title and 'en' in title_dict:
+                title = title_dict['en']
+
+            # 4. 그래도 없으면 첫번째 제목 사용
+            if not title:
+                title = list(title_dict.values())[0] if title_dict else manga_id
+
+            year = str(attributes.get('year')) if attributes.get('year') else None
+            author = None
+            relationships = manga.get('relationships', [])
+            for rel in relationships:
+                if rel.get('type') == 'author':
+                    author_attrs = rel.get('attributes', {})
+                    author = author_attrs.get('name')
+                    if author and not await is_korean(author):
+                        author = await translate_to_korean(author)
+                    break
+
+            img_url = None
+            for rel in relationships:
+                if rel.get('type') == 'cover_art':
+                    cover_attrs = rel.get('attributes', {})
+                    filename = cover_attrs.get('fileName')
+                    if filename:
+                        img_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
+                        print(f"이미지 정보: {img_url}")
+                    break
+
+            print(f"MangaDex ID로 가져온 정보 - 제목: {title}, 년도: {year}, 작가: {author}")
+            return title, year, author, img_url
+
+        except Exception as e:
+            print(f"❌ MangaDex API error: {e}")
+            return None, None, None, None
+
+    @staticmethod
     async def _search_manga_direct(session, name):
         """MangaDex에서 직접 검색 (내부용)"""
         url = f"https://api.mangadex.org/manga?title={name}&limit=1&includes[]=author&includes[]=cover_art"
@@ -351,8 +430,20 @@ class ContentSearcher:
 
     @staticmethod
     async def search_manga(session, name):
-        """MangaDex에서 만화 검색 (한국어 제목 없으면 Google 스크래핑)"""
+        """MangaDex에서 만화 검색 (URL 또는 제목으로 검색)"""
         print(f"[DEBUG] search_manga() 시작 - name: {name}")
+
+        # 0차: MangaDex URL인지 확인
+        manga_id = ContentSearcher._extract_mangadex_id(name)
+        if manga_id:
+            print(f"[DEBUG] search_manga() MangaDex URL 감지 - ID: {manga_id}")
+            result = await ContentSearcher._fetch_manga_by_id(session, manga_id)
+            if result[0] is not None:
+                print(f"[DEBUG] search_manga() URL로 조회 성공 - title={result[0]}")
+                return result
+            print(f"[DEBUG] search_manga() URL로 조회 실패")
+            return None, None, None, None
+
         # 1차: 영어로 번역 후 검색
         print(f"[DEBUG] search_manga() [1차] 영문 번역 시도...")
         translated_name = await translate_to_english(name)
