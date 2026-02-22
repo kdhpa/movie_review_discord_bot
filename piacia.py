@@ -10,6 +10,7 @@ CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "ma
 from database import Database
 from api_searcher import ContentSearcher
 from news_scheduler import NewsScheduler
+from assistant_service import AssistantService
 import io
 import os
 
@@ -375,11 +376,16 @@ class MyBot(commands.Bot):
         super().__init__(*args, **kwargs)
         self.db = Database()
         self.news_scheduler = NewsScheduler(self)
+        self.assistant_service = None
 
     async def on_ready(self):
         print(f'Logged in as {self.user}')
 
     async def setup_hook(self):
+        # Assistant Service 초기화
+        self.assistant_service = AssistantService(self)
+        await self.assistant_service.setup_gemini()
+
         self.tree.add_command(review_command)
         self.tree.add_command(my_reviews_command)
         self.tree.add_command(stats_command)
@@ -390,8 +396,24 @@ class MyBot(commands.Bot):
         # 뉴스 스케줄러 시작
         self.news_scheduler.start()
 
+    async def on_message(self, message: discord.Message):
+        # 봇 메시지 무시
+        if message.author.bot:
+            return
 
-bot = MyBot(command_prefix="/", intents=discord.Intents.default())
+        # Assistant Service로 메시지 처리
+        if self.assistant_service and self.assistant_service.monitor_channel_id:
+            if message.channel.id == self.assistant_service.monitor_channel_id:
+                await self.assistant_service.process_message(message)
+
+        # 기본 커맨드 처리
+        await self.process_commands(message)
+
+
+# Intents 설정 (message_content 활성화)
+intents = discord.Intents.default()
+intents.message_content = True
+bot = MyBot(command_prefix="/", intents=intents)
 
 
 # ==================== Slash Commands ====================
