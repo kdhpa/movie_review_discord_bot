@@ -47,22 +47,22 @@ class CommitView(discord.ui.View):
         self.original_user_id = original_user_id
         self.committed = None
 
-    @discord.ui.button(label="커밋하기", style=discord.ButtonStyle.primary, emoji="📝")
+    @discord.ui.button(label="브랜치로 저장", style=discord.ButtonStyle.primary, emoji="🌿")
     async def commit(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.original_user_id:
-            await interaction.response.send_message("❌ 요청자만 커밋할 수 있습니다.", ephemeral=True)
+            await interaction.response.send_message("❌ 요청자만 저장할 수 있습니다.", ephemeral=True)
             return
 
         await interaction.response.defer()
 
-        # Run git add and commit
+        # Run git add, commit, and push to branch
         result = await self.assistant_service.run_git_commit()
 
         if result['success']:
-            await interaction.followup.send(f"✅ 커밋 완료!\n```\n{result['message']}\n```", ephemeral=True)
+            await interaction.followup.send(f"✅ {result['message']}", ephemeral=True)
             self.committed = True
         else:
-            await interaction.followup.send(f"❌ 커밋 실패:\n```\n{result['error']}\n```", ephemeral=True)
+            await interaction.followup.send(f"❌ 실패:\n```\n{result['error']}\n```", ephemeral=True)
             self.committed = False
 
         self.stop()
@@ -376,8 +376,32 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
             return {'has_changes': False, 'error': str(e)}
 
     async def run_git_commit(self) -> dict:
-        """Run git add and commit with auto-generated message"""
+        """Run git add, commit, and push to a feature branch (not main)"""
+        import datetime
+
         try:
+            # Check for GitHub token
+            github_token = os.getenv("GITHUB_TOKEN")
+            if not github_token:
+                return {'success': False, 'error': 'GITHUB_TOKEN 환경변수가 설정되지 않았습니다.'}
+
+            # Configure git user for Railway environment
+            await asyncio.create_subprocess_exec(
+                "git", "config", "user.email", "assistant@discord.bot",
+                cwd=self.working_dir
+            )
+            await asyncio.create_subprocess_exec(
+                "git", "config", "user.name", "Assistant Service",
+                cwd=self.working_dir
+            )
+
+            # Set remote URL with token for authentication
+            repo_url = f"https://{github_token}@github.com/kdhpa/movie_review_discord_bot.git"
+            await asyncio.create_subprocess_exec(
+                "git", "remote", "set-url", "origin", repo_url,
+                cwd=self.working_dir
+            )
+
             # Get diff for commit message
             diff_process = await asyncio.create_subprocess_exec(
                 "git", "diff", "--stat",
@@ -387,6 +411,19 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
             )
             diff_stdout, _ = await diff_process.communicate()
             diff_info = diff_stdout.decode('utf-8', errors='replace')[:200]
+
+            # Create unique branch name with timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            branch_name = f"assistant/{timestamp}"
+
+            # Create and checkout new branch
+            branch_process = await asyncio.create_subprocess_exec(
+                "git", "checkout", "-b", branch_name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.working_dir
+            )
+            await branch_process.communicate()
 
             # Git add
             add_process = await asyncio.create_subprocess_exec(
@@ -405,12 +442,29 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.working_dir
             )
-            stdout, stderr = await commit_process.communicate()
+            commit_stdout, commit_stderr = await commit_process.communicate()
 
-            if commit_process.returncode == 0:
-                return {'success': True, 'message': stdout.decode('utf-8', errors='replace')}
+            if commit_process.returncode != 0:
+                return {'success': False, 'error': commit_stderr.decode('utf-8', errors='replace')}
+
+            # Git push to feature branch (not main)
+            push_process = await asyncio.create_subprocess_exec(
+                "git", "push", "-u", "origin", branch_name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.working_dir
+            )
+            push_stdout, push_stderr = await push_process.communicate()
+
+            if push_process.returncode == 0:
+                pr_url = f"https://github.com/kdhpa/movie_review_discord_bot/compare/main...{branch_name}"
+                return {
+                    'success': True,
+                    'message': f"브랜치 '{branch_name}'에 푸시 완료!\n\nPR 생성: {pr_url}"
+                }
             else:
-                return {'success': False, 'error': stderr.decode('utf-8', errors='replace')}
+                return {'success': False, 'error': f"Push 실패: {push_stderr.decode('utf-8', errors='replace')}"}
+
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
