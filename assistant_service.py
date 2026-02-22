@@ -7,6 +7,8 @@ import asyncio
 import discord
 from discord.ui import View, Button
 import google.generativeai as genai
+import anthropic
+from claude_tools import FILE_TOOLS, ToolExecutor
 
 
 class ConfirmView(discord.ui.View):
@@ -94,8 +96,13 @@ class AssistantService:
     def __init__(self, bot):
         self.bot = bot
         self.gemini_model = None
+        self.claude_client = None
+        self.tool_executor = None
         self.monitor_channel_id = None
         self.working_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Initialize tool executor
+        self.tool_executor = ToolExecutor(self.working_dir)
 
         # Load channel ID from environment
         channel_id = os.getenv("MONITOR_CHANNEL_ID")
@@ -103,20 +110,36 @@ class AssistantService:
             self.monitor_channel_id = int(channel_id)
 
     async def setup_gemini(self):
-        """Initialize Gemini API"""
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("[AssistantService] GEMINI_API_KEY not found - service disabled")
-            return False
+        """Initialize Gemini and Anthropic APIs"""
+        gemini_ready = False
+        claude_ready = False
 
-        try:
-            genai.configure(api_key=api_key)
-            self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
-            print("[AssistantService] Gemini API initialized successfully")
-            return True
-        except Exception as e:
-            print(f"[AssistantService] Failed to initialize Gemini: {e}")
-            return False
+        # Initialize Gemini
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            print("[AssistantService] GEMINI_API_KEY not found - prompt generation disabled")
+        else:
+            try:
+                genai.configure(api_key=gemini_key)
+                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+                print("[AssistantService] Gemini API initialized successfully")
+                gemini_ready = True
+            except Exception as e:
+                print(f"[AssistantService] Failed to initialize Gemini: {e}")
+
+        # Initialize Anthropic
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if not anthropic_key:
+            print("[AssistantService] ANTHROPIC_API_KEY not found - Claude execution disabled")
+        else:
+            try:
+                self.claude_client = anthropic.Anthropic(api_key=anthropic_key)
+                print("[AssistantService] Anthropic API initialized successfully")
+                claude_ready = True
+            except Exception as e:
+                print(f"[AssistantService] Failed to initialize Anthropic: {e}")
+
+        return gemini_ready and claude_ready
 
     async def process_message(self, message: discord.Message):
         """Process a new message from the monitored channel"""
@@ -199,42 +222,98 @@ class AssistantService:
             return None
 
     async def run_claude_code(self, prompt: str) -> dict:
-        """Execute Claude Code CLI with the generated prompt"""
-        try:
-            # Prepare command with allowed tools for automation
-            cmd = [
-                "claude",
-                "-p", prompt,
-                "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(git diff *),Bash(git status *),Bash(python *)"
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir
-            )
-
-            stdout, stderr = await process.communicate()
-
-            return {
-                'success': process.returncode == 0,
-                'stdout': stdout.decode('utf-8', errors='replace'),
-                'stderr': stderr.decode('utf-8', errors='replace'),
-                'returncode': process.returncode
-            }
-        except FileNotFoundError:
+        """Execute Claude via Anthropic API with tool use"""
+        if not self.claude_client:
             return {
                 'success': False,
                 'stdout': '',
-                'stderr': 'Claude Code CLI not found. Make sure it is installed and in PATH.',
+                'stderr': 'Anthropic API not initialized. Check ANTHROPIC_API_KEY.',
+                'returncode': -1
+            }
+
+        try:
+            # System prompt for Claude
+            system_prompt = """You are a helpful coding assistant working on a Discord bot project.
+You have access to file tools to read, write, edit, and search files.
+Always read files before editing them to understand the current state.
+Make minimal, focused changes. Explain what you're doing briefly.
+The project uses Python with discord.py, PostgreSQL, and various APIs."""
+
+            messages = [{"role": "user", "content": prompt}]
+            collected_outputs = []
+            max_iterations = 20  # Safety limit
+
+            for iteration in range(max_iterations):
+                # Call Claude API with tools
+                response = await asyncio.to_thread(
+                    self.claude_client.messages.create,
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=4096,
+                    system=system_prompt,
+                    tools=FILE_TOOLS,
+                    messages=messages
+                )
+
+                # Process response content
+                assistant_content = []
+                tool_uses = []
+
+                for block in response.content:
+                    if block.type == "text":
+                        collected_outputs.append(block.text)
+                        assistant_content.append(block)
+                    elif block.type == "tool_use":
+                        tool_uses.append(block)
+                        assistant_content.append(block)
+
+                # Add assistant message to conversation
+                messages.append({"role": "assistant", "content": assistant_content})
+
+                # Check if we're done (no more tool use)
+                if response.stop_reason == "end_turn" or not tool_uses:
+                    break
+
+                # Execute tools and collect results
+                tool_results = []
+                for tool_use in tool_uses:
+                    result = await asyncio.to_thread(
+                        self.tool_executor.execute,
+                        tool_use.name,
+                        tool_use.input
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": result
+                    })
+                    # Log tool execution
+                    collected_outputs.append(f"[Tool: {tool_use.name}] {result[:200]}{'...' if len(result) > 200 else ''}")
+
+                # Add tool results to conversation
+                messages.append({"role": "user", "content": tool_results})
+
+            # Combine all outputs
+            final_output = "\n\n".join(collected_outputs)
+
+            return {
+                'success': True,
+                'stdout': final_output,
+                'stderr': '',
+                'returncode': 0
+            }
+
+        except anthropic.APIError as e:
+            return {
+                'success': False,
+                'stdout': '',
+                'stderr': f'Anthropic API error: {str(e)}',
                 'returncode': -1
             }
         except Exception as e:
             return {
                 'success': False,
                 'stdout': '',
-                'stderr': str(e),
+                'stderr': f'Error: {str(e)}',
                 'returncode': -1
             }
 
