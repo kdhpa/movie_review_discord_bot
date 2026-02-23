@@ -256,7 +256,12 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.prefetched_info = prefetched_info
 
         if prefetched_info:
-            # URL로 정보가 이미 있으면 제목 필드 생략
+            # URL로 정보가 있어도 제목 필드 표시 (기본값으로 자동 추출 제목)
+            self.add_item(discord.ui.TextInput(
+                label="작품 이름 (수정 가능)",
+                default=prefetched_info[0],  # 자동 추출된 제목
+                placeholder="필요시 수정하세요"
+            ))
             self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
             self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
             self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
@@ -270,12 +275,13 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
     async def on_submit(self, interaction: discord.Interaction):
         print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}, 작성자: {self.author_name}")
 
-        # prefetched_info가 있으면 필드 인덱스가 다름
+        # prefetched_info가 있으면 필드 인덱스가 다름 (제목 필드 추가됨)
         if self.prefetched_info:
-            title, year, director, img_url = self.prefetched_info
-            score = self.children[0].value
-            self.line_comment = self.children[1].value
-            self.comment = self.children[2].value
+            _, year, director, img_url = self.prefetched_info  # 자동 추출 제목 무시
+            title = self.children[0].value  # 사용자가 입력/수정한 제목
+            score = self.children[1].value  # 별점
+            self.line_comment = self.children[2].value
+            self.comment = self.children[3].value
             print(f"[DEBUG] ReviewForm.on_submit() prefetched_info 사용 - title: {title}, score: {score}")
         else:
             title = self.children[0].value
