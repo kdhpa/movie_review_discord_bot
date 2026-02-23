@@ -296,6 +296,18 @@ class ContentSearcher:
         return None
 
     @staticmethod
+    async def fetch_manga_by_url(session, url):
+        """URL에서 ID 추출 후 만화 정보 조회 (외부 호출용)"""
+        manga_id = ContentSearcher._extract_mangadex_id(url)
+        if not manga_id:
+            return None
+        result = await ContentSearcher._fetch_manga_by_id(session, manga_id)
+        # (title, year, author, img_url) 형태로 반환
+        if result[0] is not None:
+            return result
+        return None
+
+    @staticmethod
     async def _fetch_manga_by_id(session, manga_id):
         """MangaDex ID로 직접 만화 정보 조회"""
         url = f"https://api.mangadex.org/manga/{manga_id}?includes[]=author&includes[]=cover_art"

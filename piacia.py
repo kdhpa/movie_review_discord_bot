@@ -240,7 +240,7 @@ class MovieSelectView(discord.ui.View):
 
 
 class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
-    def __init__(self, db, category, author_id: int, id_name: str,author_name: str):
+    def __init__(self, db, category, author_id: int, id_name: str, author_name: str, prefetched_info: tuple = None):
         super().__init__()
         self.db = db
         self.category = category  # 'tmdb', 'manga', 'webtoon'
@@ -252,20 +252,37 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.score = None
         self.line_comment = None
         self.comment = None
-        self.add_item(discord.ui.TextInput(label="작품 이름", placeholder="제목을 입력하세요"))
-        self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
-        self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
-        self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
+        # URL로 미리 가져온 만화 정보 (title, year, author, img_url)
+        self.prefetched_info = prefetched_info
+
+        if prefetched_info:
+            # URL로 정보가 이미 있으면 제목 필드 생략
+            self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
+            self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
+            self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
+        else:
+            # 기존 필드 모두 포함
+            self.add_item(discord.ui.TextInput(label="작품 이름", placeholder="제목을 입력하세요"))
+            self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
+            self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
+            self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
 
     async def on_submit(self, interaction: discord.Interaction):
         print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}, 작성자: {self.author_name}")
 
-        title = self.children[0].value
-        score = self.children[1].value
-        self.line_comment = self.children[2].value
-        self.comment = self.children[3].value
-
-        print(f"[DEBUG] ReviewForm.on_submit() 입력값 - title: {title}, score: {score}")
+        # prefetched_info가 있으면 필드 인덱스가 다름
+        if self.prefetched_info:
+            title, year, director, img_url = self.prefetched_info
+            score = self.children[0].value
+            self.line_comment = self.children[1].value
+            self.comment = self.children[2].value
+            print(f"[DEBUG] ReviewForm.on_submit() prefetched_info 사용 - title: {title}, score: {score}")
+        else:
+            title = self.children[0].value
+            score = self.children[1].value
+            self.line_comment = self.children[2].value
+            self.comment = self.children[3].value
+            print(f"[DEBUG] ReviewForm.on_submit() 입력값 - title: {title}, score: {score}")
 
         try:
             self.score = float(score)
@@ -277,6 +294,31 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
             return
 
         await interaction.response.defer()
+
+        # prefetched_info가 있으면 검색 없이 바로 저장
+        if self.prefetched_info:
+            print(f"[DEBUG] ReviewForm.on_submit() prefetched_info로 바로 저장")
+            movie_info = {
+                'title': title,
+                'year': year,
+                'director': director,
+                'img_url': img_url,
+                'category': 'manga'
+            }
+
+            await _save_and_send_review(
+                interaction,
+                self.db,
+                movie_info,
+                self.category,
+                self.score,
+                self.line_comment,
+                self.comment,
+                self.author_id,
+                self.author_name,
+                self.display_name
+            )
+            return
 
         original_title = title
 
@@ -419,14 +461,27 @@ bot = MyBot(command_prefix="/", intents=intents)
 # ==================== Slash Commands ====================
 
 @discord.app_commands.command(name="한줄평", description="리뷰를 작성합니다.")
-@discord.app_commands.describe(카테고리="리뷰할 콘텐츠 종류")
+@discord.app_commands.describe(카테고리="리뷰할 콘텐츠 종류", 링크="MangaDex 링크 (만화 카테고리 전용)")
 @discord.app_commands.choices(카테고리=[
     discord.app_commands.Choice(name="🎬 영화/드라마/애니", value="tmdb"),
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
 ])
-async def review_command(interaction: discord.Interaction, 카테고리: str):
-    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, str(interaction.user), interaction.user.display_name)
+async def review_command(interaction: discord.Interaction, 카테고리: str, 링크: str = None):
+    prefetched_info = None
+
+    # 만화 카테고리 + 링크가 있으면 MangaDex에서 정보 미리 조회
+    if 카테고리 == 'manga' and 링크:
+        async with aiohttp.ClientSession() as session:
+            prefetched_info = await ContentSearcher.fetch_manga_by_url(session, 링크)
+
+        if not prefetched_info:
+            await interaction.response.send_message("❌ 유효하지 않은 MangaDex URL입니다.", ephemeral=True)
+            return
+
+        print(f"[DEBUG] review_command() MangaDex URL로 정보 조회 성공: {prefetched_info[0]}")
+
+    modal = ReviewForm(bot.db, 카테고리, interaction.user.id, str(interaction.user), interaction.user.display_name, prefetched_info)
     await interaction.response.send_modal(modal)
 
 
