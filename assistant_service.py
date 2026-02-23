@@ -237,25 +237,36 @@ class AssistantService:
             }
 
         try:
-            # System prompt for Claude
-            system_prompt = """You are a helpful coding assistant working on a Discord bot project.
-You have access to file tools to read, write, edit, and search files.
-Always read files before editing them to understand the current state.
-Make minimal, focused changes. Explain what you're doing briefly.
-The project uses Python with discord.py, PostgreSQL, and various APIs."""
+            # System prompt for Claude - strengthened to force tool usage
+            system_prompt = """You are a coding assistant that MUST use tools to make changes.
+
+CRITICAL RULES:
+1. You MUST use file tools (read_file, write_file, edit_file) to modify code
+2. DO NOT just describe changes - EXECUTE them using tools
+3. ALWAYS use read_file first before editing to understand current state
+4. After editing, confirm changes with read_file
+5. Make minimal, focused changes
+
+Working directory: Discord bot project (Python, discord.py, PostgreSQL)
+
+Available tools: read_file, write_file, edit_file, list_directory, search_files
+You MUST call these tools to complete the task. Never just explain what to do."""
 
             messages = [{"role": "user", "content": prompt}]
             collected_outputs = []
             max_iterations = 20  # Safety limit
 
+            print(f"[AssistantService] Starting Claude execution with prompt length: {len(prompt)}")
+
             for iteration in range(max_iterations):
-                # Call Claude API with tools
+                # Call Claude API with tools - tool_choice enabled
                 response = await asyncio.to_thread(
                     self.claude_client.messages.create,
                     model="claude-sonnet-4-20250514",
                     max_tokens=4096,
                     system=system_prompt,
                     tools=FILE_TOOLS,
+                    tool_choice={"type": "auto"},
                     messages=messages
                 )
 
@@ -271,11 +282,19 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
                         tool_uses.append(block)
                         assistant_content.append(block)
 
+                # Debug logging
+                print(f"[AssistantService] Iteration {iteration + 1}, stop_reason: {response.stop_reason}")
+                print(f"[AssistantService] Tool uses: {len(tool_uses)}")
+                if tool_uses:
+                    tool_names = [t.name for t in tool_uses]
+                    print(f"[AssistantService] Tools called: {tool_names}")
+
                 # Add assistant message to conversation
                 messages.append({"role": "assistant", "content": assistant_content})
 
                 # Check if we're done (no more tool use)
                 if response.stop_reason == "end_turn" or not tool_uses:
+                    print(f"[AssistantService] Execution completed after {iteration + 1} iterations")
                     break
 
                 # Execute tools and collect results
@@ -361,6 +380,38 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
             )
             await original_msg.edit(embed=embed, view=None, content=None)
 
+    async def _run_git_command(self, args: list, ignore_error: bool = False) -> dict:
+        """Git 명령 실행 및 결과 대기"""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.working_dir
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0 and not ignore_error:
+                error_msg = stderr.decode('utf-8', errors='replace')
+                print(f"[AssistantService] Git command failed: {args} -> {error_msg}")
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'returncode': process.returncode
+                }
+            return {
+                'success': True,
+                'output': stdout.decode('utf-8', errors='replace'),
+                'returncode': process.returncode
+            }
+        except Exception as e:
+            print(f"[AssistantService] Git command exception: {args} -> {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'returncode': -1
+            }
+
     async def get_git_status(self) -> dict:
         """Get current git status"""
         try:
@@ -390,87 +441,90 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
             if not github_token:
                 return {'success': False, 'error': 'GITHUB_TOKEN 환경변수가 설정되지 않았습니다.'}
 
-            # Configure git user for Railway environment
-            await asyncio.create_subprocess_exec(
-                "git", "config", "user.email", "assistant@discord.bot",
-                cwd=self.working_dir
+            print("[AssistantService] Starting git commit process...")
+
+            # Step 1: Check if .git folder exists, init if needed
+            git_dir = os.path.join(self.working_dir, ".git")
+            if not os.path.isdir(git_dir):
+                print("[AssistantService] .git folder not found, initializing git repo...")
+                init_result = await self._run_git_command(["git", "init"])
+                if not init_result['success']:
+                    return {'success': False, 'error': f"git init 실패: {init_result.get('error', 'Unknown error')}"}
+                print("[AssistantService] git init completed")
+
+            # Step 2: Configure git user for Railway environment
+            print("[AssistantService] Configuring git user...")
+            config_email = await self._run_git_command(
+                ["git", "config", "user.email", "assistant@discord.bot"],
+                ignore_error=True
             )
-            await asyncio.create_subprocess_exec(
-                "git", "config", "user.name", "Assistant Service",
-                cwd=self.working_dir
+            config_name = await self._run_git_command(
+                ["git", "config", "user.name", "Assistant Service"],
+                ignore_error=True
             )
 
-            # Set remote URL with token for authentication
+            # Step 3: Set remote URL with token for authentication
             repo_url = f"https://{github_token}@github.com/kdhpa/movie_review_discord_bot.git"
-            await asyncio.create_subprocess_exec(
-                "git", "remote", "set-url", "origin", repo_url,
-                cwd=self.working_dir
-            )
 
-            # Get diff for commit message
-            diff_process = await asyncio.create_subprocess_exec(
-                "git", "diff", "--stat",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir
-            )
-            diff_stdout, _ = await diff_process.communicate()
-            diff_info = diff_stdout.decode('utf-8', errors='replace')[:200]
+            # Check if remote exists
+            remote_check = await self._run_git_command(["git", "remote", "get-url", "origin"], ignore_error=True)
+            if remote_check['success']:
+                # Update existing remote
+                await self._run_git_command(
+                    ["git", "remote", "set-url", "origin", repo_url],
+                    ignore_error=True
+                )
+            else:
+                # Add new remote
+                await self._run_git_command(
+                    ["git", "remote", "add", "origin", repo_url],
+                    ignore_error=True
+                )
+            print("[AssistantService] Git remote configured")
 
-            # Create unique branch name with timestamp
+            # Step 4: Get diff for commit message
+            diff_result = await self._run_git_command(["git", "diff", "--stat"], ignore_error=True)
+            diff_info = diff_result.get('output', '')[:200] if diff_result['success'] else ''
+
+            # Step 5: Create unique branch name with timestamp
             timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             branch_name = f"assistant/{timestamp}"
 
-            # Create and checkout new branch
-            branch_process = await asyncio.create_subprocess_exec(
-                "git", "checkout", "-b", branch_name,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir
-            )
-            await branch_process.communicate()
+            # Step 6: Create and checkout new branch
+            print(f"[AssistantService] Creating branch: {branch_name}")
+            branch_result = await self._run_git_command(["git", "checkout", "-b", branch_name])
+            if not branch_result['success']:
+                return {'success': False, 'error': f"브랜치 생성 실패: {branch_result.get('error', 'Unknown error')}"}
 
-            # Git add
-            add_process = await asyncio.create_subprocess_exec(
-                "git", "add", "-A",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir
-            )
-            await add_process.communicate()
+            # Step 7: Git add
+            print("[AssistantService] Staging changes...")
+            add_result = await self._run_git_command(["git", "add", "-A"])
+            if not add_result['success']:
+                return {'success': False, 'error': f"git add 실패: {add_result.get('error', 'Unknown error')}"}
 
-            # Git commit
+            # Step 8: Git commit
             commit_msg = f"feat: Auto-commit by Assistant Service\n\nChanges:\n{diff_info}"
-            commit_process = await asyncio.create_subprocess_exec(
-                "git", "commit", "-m", commit_msg,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir
-            )
-            commit_stdout, commit_stderr = await commit_process.communicate()
+            print("[AssistantService] Committing changes...")
+            commit_result = await self._run_git_command(["git", "commit", "-m", commit_msg])
+            if not commit_result['success']:
+                return {'success': False, 'error': f"커밋 실패: {commit_result.get('error', 'Unknown error')}"}
 
-            if commit_process.returncode != 0:
-                return {'success': False, 'error': commit_stderr.decode('utf-8', errors='replace')}
+            # Step 9: Git push to feature branch (not main)
+            print(f"[AssistantService] Pushing to origin/{branch_name}...")
+            push_result = await self._run_git_command(["git", "push", "-u", "origin", branch_name])
 
-            # Git push to feature branch (not main)
-            push_process = await asyncio.create_subprocess_exec(
-                "git", "push", "-u", "origin", branch_name,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir
-            )
-            push_stdout, push_stderr = await push_process.communicate()
-
-            if push_process.returncode == 0:
+            if push_result['success']:
                 pr_url = f"https://github.com/kdhpa/movie_review_discord_bot/compare/main...{branch_name}"
+                print(f"[AssistantService] Push successful! PR URL: {pr_url}")
                 return {
                     'success': True,
                     'message': f"브랜치 '{branch_name}'에 푸시 완료!\n\nPR 생성: {pr_url}"
                 }
             else:
-                return {'success': False, 'error': f"Push 실패: {push_stderr.decode('utf-8', errors='replace')}"}
+                return {'success': False, 'error': f"Push 실패: {push_result.get('error', 'Unknown error')}"}
 
         except Exception as e:
+            print(f"[AssistantService] Git commit exception: {e}")
             return {'success': False, 'error': str(e)}
 
     async def run_git_revert(self) -> dict:
