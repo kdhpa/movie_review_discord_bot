@@ -47,7 +47,7 @@ class CommitView(discord.ui.View):
         self.original_user_id = original_user_id
         self.committed = None
 
-    @discord.ui.button(label="브랜치로 저장", style=discord.ButtonStyle.primary, emoji="🌿")
+    @discord.ui.button(label="적용 & 브랜치 저장", style=discord.ButtonStyle.primary, emoji="🚀")
     async def commit(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.original_user_id:
             await interaction.response.send_message("❌ 요청자만 저장할 수 있습니다.", ephemeral=True)
@@ -59,15 +59,20 @@ class CommitView(discord.ui.View):
         result = await self.assistant_service.run_git_commit()
 
         if result['success']:
-            await interaction.followup.send(f"✅ {result['message']}", ephemeral=True)
+            await interaction.followup.send(
+                f"✅ {result['message']}\n\n🔄 봇을 재시작하여 변경사항을 적용합니다...",
+                ephemeral=False
+            )
             self.committed = True
+            self.stop()
+            # Restart the bot to apply changes
+            await self.assistant_service.restart_bot()
         else:
             await interaction.followup.send(f"❌ 실패:\n```\n{result['error']}\n```", ephemeral=True)
             self.committed = False
+            self.stop()
 
-        self.stop()
-
-    @discord.ui.button(label="취소 (변경사항 되돌리기)", style=discord.ButtonStyle.danger, emoji="🔄")
+    @discord.ui.button(label="취소", style=discord.ButtonStyle.danger, emoji="🔄")
     async def revert(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.original_user_id:
             await interaction.response.send_message("❌ 요청자만 되돌리기할 수 있습니다.", ephemeral=True)
@@ -495,3 +500,11 @@ The project uses Python with discord.py, PostgreSQL, and various APIs."""
                 return {'success': False, 'error': stderr.decode('utf-8', errors='replace')}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    async def restart_bot(self):
+        """Restart bot process - Railway will automatically restart it"""
+        import sys
+        print("[AssistantService] Restarting bot to apply changes...")
+        # Give a moment for the message to be sent
+        await asyncio.sleep(1)
+        sys.exit(0)
