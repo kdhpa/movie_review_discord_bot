@@ -528,7 +528,7 @@ async def my_reviews_command(interaction: discord.Interaction, 카테고리: str
 
         embed.add_field(
             name=f"{emoji} {review['movie_title']} {subtitle}",
-            value=f"⭐ {score_emoji} {review['score']}/5\n💬 \"{review['one_line_review']}\"",
+            value=f"⭐ {score_emoji} {review['score']} 점/5\n💬 \"{review['one_line_review']}\"",
             inline=False
         )
 
