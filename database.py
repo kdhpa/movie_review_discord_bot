@@ -189,3 +189,47 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to delete review: {e}")
             return False
+
+    def get_user_review(self, user_id, title, category=None):
+        """사용자의 특정 작품 리뷰 조회"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    if category:
+                        cursor.execute('''
+                            SELECT movie_title, movie_year, director, score,
+                                   one_line_review, additional_comment, category
+                            FROM reviews
+                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                        ''', (user_id, title, category))
+                    else:
+                        cursor.execute('''
+                            SELECT movie_title, movie_year, director, score,
+                                   one_line_review, additional_comment, category
+                            FROM reviews
+                            WHERE user_id = %s AND movie_title = %s
+                        ''', (user_id, title))
+
+                    return cursor.fetchone()
+        except Exception as e:
+            print(f"❌ Failed to get user review: {e}")
+            return None
+
+    def update_review(self, user_id, title, category, score, one_line_review, additional_comment):
+        """리뷰 수정"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        UPDATE reviews
+                        SET score = %s, one_line_review = %s, additional_comment = %s
+                        WHERE user_id = %s AND movie_title = %s AND category = %s
+                        RETURNING id
+                    ''', (score, one_line_review, additional_comment, user_id, title, category))
+
+                    updated = cursor.fetchone()
+                    conn.commit()
+                    return updated is not None
+        except Exception as e:
+            print(f"❌ Failed to update review: {e}")
+            return False
