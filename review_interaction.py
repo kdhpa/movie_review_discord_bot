@@ -60,49 +60,9 @@ class ReviewReactionView(discord.ui.View):
                 )
                 return
 
-            # Get user's current reaction
-            user_reaction = db.get_user_reaction(review['id'], interaction.user.id)
-
-            # Show ephemeral status view with user's reaction highlighted
-            status_view = ReactionStatusView(review, interaction.message, user_reaction)
-            await interaction.response.send_message(
-                f"🎬 **{review['movie_title']}** 리뷰 반응\n"
-                f"내 반응: {REACTION_TYPES[user_reaction]['emoji'] + ' ' + REACTION_TYPES[user_reaction]['label'] if user_reaction else '없음'}",
-                view=status_view,
-                ephemeral=True
-            )
-
-        return callback
-
-
-class ReactionStatusView(discord.ui.View):
-    """Ephemeral view showing user's reaction status with selected reaction in blue."""
-
-    def __init__(self, review, original_message, user_reaction):
-        super().__init__(timeout=180)  # 3 minutes timeout for ephemeral
-        self.review = review
-        self.original_message = original_message
-        self.user_reaction = user_reaction
-        self._build_buttons()
-
-    def _build_buttons(self):
-        for rtype, info in REACTION_TYPES.items():
-            # Use primary (blue) if this is user's current reaction, else secondary (gray)
-            style = discord.ButtonStyle.primary if rtype == self.user_reaction else discord.ButtonStyle.secondary
-            btn = discord.ui.Button(
-                style=style,
-                label=info['label'],
-                emoji=info['emoji'],
-                custom_id=f"status_reaction:{rtype}",
-                row=info['row'],
-            )
-            btn.callback = self._make_status_callback(rtype)
-            self.add_item(btn)
-
-    def _make_status_callback(self, rtype):
-        async def callback(interaction: discord.Interaction):
+            # Show modal directly
             info = REACTION_TYPES[rtype]
-            modal = ReactionCommentModal(self.review, self.original_message, rtype, info)
+            modal = ReactionCommentModal(review, interaction.message, rtype, info)
             await interaction.response.send_modal(modal)
 
         return callback
@@ -178,12 +138,6 @@ class ReactionCommentModal(discord.ui.Modal):
 
                     # Lock the thread so only bot can send messages via modal
                     await thread.edit(locked=True)
-
-                    # Send initial message
-                    await thread.send(
-                        f"💬 **{self.review['movie_title']}** 리뷰 토론 쓰레드입니다.\n"
-                        f"반응 버튼을 눌러 코멘트를 남겨주세요!"
-                    )
 
                 # Delete old thread message if editing
                 if is_edit and old_message_id:
