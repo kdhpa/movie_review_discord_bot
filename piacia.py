@@ -982,46 +982,70 @@ async def news_command(interaction: discord.Interaction):
 async def delete_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None):
     await interaction.response.defer(ephemeral=True)
 
-    # 삭제 전 기존 데이터 조회 (로그용)
+    # 삭제 전 기존 데이터 조회 (로그용 + 메시지 삭제용)
     review = bot.db.get_user_review(interaction.user.id, 제목, 카테고리)
 
+    if not review:
+        await interaction.followup.send(f"❌ '{제목}' 리뷰를 찾을 수 없습니다.")
+        return
+
+    # 메시지 및 쓰레드 삭제 시도 (DB 삭제 전에 수행)
+    message_deleted = False
+    thread_deleted = False
+
+    if review.get('message_id') and review.get('channel_id'):
+        try:
+            channel = bot.get_channel(review['channel_id'])
+            if channel:
+                message = await channel.fetch_message(review['message_id'])
+                if message:
+                    # 쓰레드가 있으면 먼저 삭제
+                    if message.thread:
+                        try:
+                            await message.thread.delete()
+                            thread_deleted = True
+                        except Exception as e:
+                            print(f"[WARN] Failed to delete thread: {e}")
+
+                    # 메시지 삭제
+                    await message.delete()
+                    message_deleted = True
+        except discord.NotFound:
+            pass  # 메시지가 이미 삭제됨
+        except Exception as e:
+            print(f"[WARN] Failed to delete review message: {e}")
+
+    # DB에서 삭제 (CASCADE로 reactions, comments도 자동 삭제)
     deleted = bot.db.delete_review(interaction.user.id, 제목, 카테고리)
 
     if deleted:
         # 삭제 로그 기록
-        if review:
-            bot.db.log_review_action(
-                user_id=interaction.user.id,
-                username=interaction.user.display_name,
-                action='delete',
-                movie_title=제목,
-                category=review.get('category', 카테고리),
-                old_score=review['score'],
-                old_one_line_review=review['one_line_review'],
-                old_additional_comment=review.get('additional_comment')
-            )
+        bot.db.log_review_action(
+            user_id=interaction.user.id,
+            username=interaction.user.display_name,
+            action='delete',
+            movie_title=제목,
+            category=review.get('category', 카테고리),
+            old_score=review['score'],
+            old_one_line_review=review['one_line_review'],
+            old_additional_comment=review.get('additional_comment')
+        )
 
         cat_text = f" ({CATEGORY_NAME.get(카테고리, '')})" if 카테고리 else ""
 
-        # 채널에서 메시지 삭제 시도
-        deleted_count = 0
+        # 결과 메시지 구성
+        result_parts = [f"✅ '{제목}'{cat_text} 리뷰가 삭제되었습니다."]
+        if message_deleted:
+            result_parts.append("메시지 삭제됨")
+        if thread_deleted:
+            result_parts.append("쓰레드 삭제됨")
 
-        async for message in interaction.channel.history(limit=500):
-            if message.author == bot.user:
-                # 카테고리별 이모지로 메시지 확인
-                for cat, emoji in CATEGORY_EMOJI.items():
-                    if f"{emoji}제목: {제목}" in message.content:
-                        if 카테고리 is None or cat == 카테고리:
-                            await message.delete()
-                            deleted_count += 1
-                            break
-
-        if deleted_count > 0:
-            await interaction.followup.send(f"✅ '{제목}'{cat_text} 리뷰가 삭제되었습니다. (메시지 {deleted_count}개 삭제)")
+        if message_deleted or thread_deleted:
+            await interaction.followup.send(f"{result_parts[0]} ({', '.join(result_parts[1:])})")
         else:
-            await interaction.followup.send(f"✅ '{제목}'{cat_text} 리뷰가 DB에서 삭제되었습니다.")
+            await interaction.followup.send(f"{result_parts[0]} (DB에서만 삭제됨)")
     else:
-        await interaction.followup.send(f"❌ '{제목}' 리뷰를 찾을 수 없습니다.")
+        await interaction.followup.send(f"❌ '{제목}' 리뷰 삭제 중 오류가 발생했습니다.")
 
 
 @discord.app_commands.command(name="리뷰수정", description="작성한 리뷰를 수정합니다.")
