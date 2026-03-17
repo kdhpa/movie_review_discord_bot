@@ -73,10 +73,12 @@ class ReviewReactionView(discord.ui.View):
 
     def _make_reaction_callback(self, rtype):
         async def callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+
             db = interaction.client.db
             review = db.get_review_by_message_id(interaction.message.id)
             if not review:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ 이 메시지에 연결된 리뷰를 찾을 수 없습니다.", ephemeral=True
                 )
                 return
@@ -86,7 +88,7 @@ class ReviewReactionView(discord.ui.View):
                 interaction.user.display_name, rtype
             )
             if action is None:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ 반응 처리 중 오류가 발생했습니다.", ephemeral=True
                 )
                 return
@@ -94,7 +96,7 @@ class ReviewReactionView(discord.ui.View):
             counts = db.get_reaction_counts(review['id'])
             comment_count = db.get_comment_count(review['id'])
             self.update_counts(counts, comment_count)
-            await interaction.response.edit_message(view=self)
+            await interaction.message.edit(view=self)
 
         return callback
 
@@ -111,17 +113,19 @@ class ReviewReactionView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
     async def _comment_view_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         db = interaction.client.db
         review = db.get_review_by_message_id(interaction.message.id)
         if not review:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ 이 메시지에 연결된 리뷰를 찾을 수 없습니다.", ephemeral=True
             )
             return
 
         comments = db.get_comments(review['id'])
         if not comments:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "💬 아직 코멘트가 없습니다.", ephemeral=True
             )
             return
@@ -135,7 +139,7 @@ class ReviewReactionView(discord.ui.View):
         if len(text) > 1900:
             text = text[:1900] + "\n..."
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"💬 **코멘트 ({len(comments)}개)**\n\n{text}", ephemeral=True
         )
 
@@ -154,10 +158,12 @@ class ReviewCommentModal(discord.ui.Modal, title="코멘트 작성"):
         self.message = message
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         db = interaction.client.db
         content = self.comment_input.value.strip()
         if not content:
-            await interaction.response.send_message("❌ 코멘트 내용을 입력해주세요.", ephemeral=True)
+            await interaction.followup.send("❌ 코멘트 내용을 입력해주세요.", ephemeral=True)
             return
 
         comment_id = db.add_comment(
@@ -165,7 +171,7 @@ class ReviewCommentModal(discord.ui.Modal, title="코멘트 작성"):
             interaction.user.display_name, content
         )
         if not comment_id:
-            await interaction.response.send_message("❌ 코멘트 저장에 실패했습니다.", ephemeral=True)
+            await interaction.followup.send("❌ 코멘트 저장에 실패했습니다.", ephemeral=True)
             return
 
         # Update button counts on the original message
@@ -179,6 +185,6 @@ class ReviewCommentModal(discord.ui.Modal, title="코멘트 작성"):
         except Exception as e:
             print(f"[ERROR] ReviewCommentModal: Failed to update view: {e}")
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ 코멘트가 등록되었습니다: \"{content}\"", ephemeral=True
         )
