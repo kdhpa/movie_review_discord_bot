@@ -717,12 +717,11 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
         # 메시지를 찾은 경우: in-place edit (첨부파일 자동 보존)
         if target_msg:
             try:
-                # 기존 반응/코멘트 카운트 유지
+                # 기존 반응 카운트 유지
                 edit_view = ReviewReactionView()
                 if self.review_data.get('id'):
                     reaction_counts = self.db.get_reaction_counts(self.review_data['id'])
-                    comment_count = self.db.get_comment_count(self.review_data['id'])
-                    edit_view.update_counts(reaction_counts, comment_count)
+                    edit_view.update_counts(reaction_counts)
                 await target_msg.edit(content=filled_form, view=edit_view)
                 if self.review_data.get('id'):
                     self.db.update_message_id(
@@ -781,8 +780,7 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
         fallback_view = ReviewReactionView()
         if self.review_data.get('id'):
             fb_counts = self.db.get_reaction_counts(self.review_data['id'])
-            fb_comment_count = self.db.get_comment_count(self.review_data['id'])
-            fallback_view.update_counts(fb_counts, fb_comment_count)
+            fallback_view.update_counts(fb_counts)
 
         if img_data:
             file = discord.File(io.BytesIO(img_data), filename="image.jpg")
