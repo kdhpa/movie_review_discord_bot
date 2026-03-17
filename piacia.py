@@ -1169,27 +1169,30 @@ async def write_review_context(interaction: discord.Interaction, message: discor
 
 @discord.app_commands.context_menu(name="리뷰 삭제")
 async def delete_review_context(interaction: discord.Interaction, message: discord.Message):
+    # 먼저 defer로 응답 시간 연장
+    await interaction.response.defer(ephemeral=True)
+
     # 봇이 보낸 메시지인지 확인
     if message.author != interaction.client.user:
-        await interaction.response.send_message("❌ 봇이 보낸 리뷰 메시지만 삭제할 수 있습니다.", ephemeral=True)
+        await interaction.followup.send("❌ 봇이 보낸 리뷰 메시지만 삭제할 수 있습니다.", ephemeral=True)
         return
 
     # 메시지에서 title, category 파싱
     title, category = parse_review_message(message.content)
     if not title or not category:
-        await interaction.response.send_message("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
+        await interaction.followup.send("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
         return
 
     # DB에서 리뷰 조회 (소유권 확인)
     review = bot.db.get_user_review(interaction.user.id, title, category)
     if not review:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
         )
         return
 
     if not is_current_review_message(review, message):
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ 최신 리뷰 메시지에서만 삭제할 수 있습니다. 가장 최근에 전송된 리뷰 메시지로 다시 시도해주세요.",
             ephemeral=True
         )
@@ -1198,7 +1201,7 @@ async def delete_review_context(interaction: discord.Interaction, message: disco
     # DB 삭제
     deleted = bot.db.delete_review(interaction.user.id, title, category)
     if not deleted:
-        await interaction.response.send_message("❌ 리뷰 삭제에 실패했습니다.", ephemeral=True)
+        await interaction.followup.send("❌ 리뷰 삭제에 실패했습니다.", ephemeral=True)
         return
 
     # 삭제 로그 기록
@@ -1220,7 +1223,7 @@ async def delete_review_context(interaction: discord.Interaction, message: disco
         print(f"[ERROR] delete_review_context() 메시지 삭제 실패: {e}")
 
     cat_name = CATEGORY_NAME.get(category, "")
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ '{title}' ({cat_name}) 리뷰가 삭제되었습니다.", ephemeral=True
     )
 
