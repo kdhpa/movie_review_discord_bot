@@ -17,6 +17,40 @@ import os
 Token = os.getenv("Token")
 
 
+# CATEGORY_EMOJI 역매핑 (emoji -> category)
+EMOJI_CATEGORY = {emoji: cat for cat, emoji in CATEGORY_EMOJI.items()}
+
+
+def parse_review_message(content):
+    """리뷰 메시지에서 title과 category를 파싱
+    첫 줄이 '{emoji}제목: {title}' 형식이어야 함
+    Returns: (title, category) or (None, None)
+    """
+    if not content:
+        return None, None
+
+    first_line = content.split('\n')[0]
+
+    for emoji, category in EMOJI_CATEGORY.items():
+        prefix = f"{emoji}제목: "
+        if first_line.startswith(prefix):
+            title = first_line[len(prefix):].strip()
+            return title, category
+
+    return None, None
+
+
+def is_current_review_message(review_data, message):
+    """DB에 저장된 최신 리뷰 메시지인지 확인"""
+    stored_message_id = review_data.get('message_id')
+    stored_channel_id = review_data.get('channel_id')
+
+    if stored_message_id and stored_channel_id:
+        return stored_message_id == message.id and stored_channel_id == message.channel.id
+
+    return True
+
+
 def return_score_emoji(score):
     """별점을 이모지로 변환"""
     float_number = min(float(score), 5)
@@ -36,6 +70,8 @@ def return_score_emoji(score):
 
     if none_number > 0:
         score_emoji += ':new_moon:' * none_number
+
+    score_emoji += f" ( {min(float(score), 5):.1f} )"
 
     return score_emoji
 
@@ -73,7 +109,7 @@ async def _save_and_send_review(
 
     # DB 저장
     print(f"[DEBUG] _save_and_send_review() DB 저장 중...")
-    db.save_review(
+    review_id = db.save_review(
         user_id=author_id,
         username=author_name,
         movie_title=title,
@@ -85,7 +121,7 @@ async def _save_and_send_review(
         category=db_category,
         img_url=img_url
     )
-    print(f"[DEBUG] _save_and_send_review() DB 저장 완료")
+    print(f"[DEBUG] _save_and_send_review() DB 저장 완료 - review_id: {review_id}")
 
     # 카테고리별 출력 형식
     emoji = CATEGORY_EMOJI.get(db_category, "🎬")
@@ -155,11 +191,16 @@ async def _save_and_send_review(
 
     if img_data:
         file = discord.File(io.BytesIO(img_data), filename="image.jpg")
-        await interaction.followup.send(filled_form, file=file)
+        sent_message = await interaction.followup.send(filled_form, file=file, wait=True)
         print(f"[DEBUG] _save_and_send_review() 이미지 포함 메시지 전송 완료")
     else:
         print(f"[DEBUG] _save_and_send_review() 이미지 없이 텍스트만 전송")
-        await interaction.followup.send(filled_form)
+        sent_message = await interaction.followup.send(filled_form, wait=True)
+
+    # message_id 저장
+    if review_id and sent_message:
+        db.update_message_id(review_id, sent_message.id, interaction.channel_id)
+        print(f"[DEBUG] _save_and_send_review() message_id 저장 완료 - {sent_message.id}")
 
     print(f"[DEBUG] _save_and_send_review() 완료")
 
@@ -421,13 +462,14 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
 # ==================== Edit Review Modal ====================
 
 class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
-    def __init__(self, db, review_data, channel, user_id, display_name):
+    def __init__(self, db, review_data, channel, user_id, display_name, target_message=None):
         super().__init__()
         self.db = db
         self.review_data = review_data
         self.channel = channel
         self.user_id = user_id
         self.display_name = display_name
+        self.target_message = target_message  # context menu에서 전달된 메시지
 
         # 기존 값을 default로 설정
         self.add_item(discord.ui.TextInput(
@@ -465,7 +507,7 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
             await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!", ephemeral=True)
             return
 
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         title = self.review_data['movie_title']
         category = self.review_data['category']
@@ -480,20 +522,25 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
             await interaction.followup.send("❌ 리뷰 수정에 실패했습니다.", ephemeral=True)
             return
 
-        # 채널에서 기존 메시지 삭제
-        emoji = CATEGORY_EMOJI.get(category, "🎬")
-        deleted_count = 0
+        # 수정 로그 기록
+        self.db.log_review_action(
+            user_id=self.user_id,
+            username=self.display_name,
+            action='edit',
+            movie_title=title,
+            category=category,
+            old_score=self.review_data['score'],
+            old_one_line_review=self.review_data['one_line_review'],
+            old_additional_comment=self.review_data.get('additional_comment'),
+            new_score=score,
+            new_one_line_review=one_line_review,
+            new_additional_comment=additional_comment
+        )
 
-        async for message in self.channel.history(limit=500):
-            if message.author == interaction.client.user:
-                if f"{emoji}제목: {title}" in message.content:
-                    await message.delete()
-                    deleted_count += 1
-                    break
-
-        # 수정된 리뷰 메시지 재전송
+        # 수정된 리뷰 메시지 생성
         year = self.review_data['movie_year']
         director = self.review_data['director']
+        emoji = CATEGORY_EMOJI.get(category, "🎬")
         cat_name = CATEGORY_NAME.get(category, "영화")
 
         # 카테고리에 따른 검색 타입 결정
@@ -538,23 +585,71 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
         if additional_comment:
             filled_form += f"\n\n📝추가 코멘트 : {additional_comment}"
 
-        # 이미지 가져오기
+        # In-place edit 시도 (3단계 fallback)
+        target_msg = None
+
+        # 1단계: context menu에서 전달된 target_message
+        if self.target_message:
+            target_msg = self.target_message
+            print(f"[DEBUG] EditReviewForm.on_submit() target_message 사용")
+
+        # 2단계: DB에 저장된 message_id로 fetch
+        if not target_msg:
+            msg_id = self.review_data.get('message_id')
+            ch_id = self.review_data.get('channel_id')
+            if msg_id and ch_id:
+                try:
+                    channel = interaction.client.get_channel(ch_id) or await interaction.client.fetch_channel(ch_id)
+                    target_msg = await channel.fetch_message(msg_id)
+                    print(f"[DEBUG] EditReviewForm.on_submit() DB message_id로 메시지 fetch 성공")
+                except Exception as e:
+                    print(f"[DEBUG] EditReviewForm.on_submit() DB message_id로 메시지 fetch 실패: {e}")
+
+        # 3단계: channel history scan
+        if not target_msg:
+            try:
+                async for message in self.channel.history(limit=500):
+                    if message.author == interaction.client.user:
+                        if f"{emoji}제목: {title}" in message.content:
+                            target_msg = message
+                            print(f"[DEBUG] EditReviewForm.on_submit() channel history scan으로 메시지 발견")
+                            break
+            except Exception as e:
+                print(f"[DEBUG] EditReviewForm.on_submit() channel history scan 실패: {e}")
+
+        # 메시지를 찾은 경우: in-place edit (첨부파일 자동 보존)
+        if target_msg:
+            try:
+                await target_msg.edit(content=filled_form)
+                if self.review_data.get('id'):
+                    self.db.update_message_id(
+                        self.review_data['id'],
+                        target_msg.id,
+                        target_msg.channel.id
+                    )
+                await interaction.followup.send(
+                    f"✅ '{title}' ({cat_name}) 리뷰가 수정되었습니다.", ephemeral=True
+                )
+                print(f"[DEBUG] EditReviewForm.on_submit() in-place edit 성공")
+                return
+            except Exception as e:
+                print(f"[ERROR] EditReviewForm.on_submit() in-place edit 실패: {e}")
+
+        # 최종 fallback: 새 메시지로 전송 (이미지 다운로드 포함)
+        print(f"[DEBUG] EditReviewForm.on_submit() 최종 fallback - 새 메시지로 전송")
         img_url = self.review_data.get('img_url')
 
-        # img_url이 없으면 (기존 리뷰) 카테고리별 API 재검색
+        # img_url이 없으면 API 재검색
         if not img_url:
-            print(f"[DEBUG] EditReviewForm.on_submit() img_url 없음 - API 재검색 시도")
             async with aiohttp.ClientSession() as session:
                 if search_category == 'tmdb':
                     _, _, _, img_url, _ = await ContentSearcher._search_tmdb_direct(session, title)
                 elif search_category == 'manga':
                     _, _, _, img_url = await ContentSearcher.search_manga(session, title)
-                else:  # webtoon
+                else:
                     _, _, _, img_url = await ContentSearcher.search_webtoon(session, title)
 
-            # 재검색으로 획득한 img_url을 DB에도 저장
             if img_url:
-                print(f"[DEBUG] EditReviewForm.on_submit() 재검색으로 img_url 획득 - DB 업데이트")
                 self.db.update_review(
                     self.user_id, title, category,
                     score, one_line_review, additional_comment, img_url=img_url
@@ -563,38 +658,40 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
         # 이미지 다운로드 및 전송
         img_data = None
         if img_url:
-            print(f"[DEBUG] EditReviewForm.on_submit() 이미지 다운로드 시작 - URL: {img_url}")
             timeout = aiohttp.ClientTimeout(total=30)
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': img_url
             }
-
             for attempt in range(3):
                 try:
                     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                         async with session.get(img_url) as img_response:
                             if img_response.status == 200:
                                 img_data = await img_response.read()
-                                print(f"[DEBUG] EditReviewForm.on_submit() 이미지 다운로드 성공 (크기: {len(img_data)} bytes)")
                                 break
                 except Exception as e:
-                    print(f"[ERROR] EditReviewForm.on_submit() 이미지 다운로드 중 오류 (시도 {attempt + 1}): {e}")
-
+                    print(f"[ERROR] EditReviewForm fallback 이미지 다운로드 오류 (시도 {attempt + 1}): {e}")
                 if attempt < 2:
                     await asyncio.sleep(1)
 
         if img_data:
             file = discord.File(io.BytesIO(img_data), filename="image.jpg")
-            await interaction.followup.send(filled_form, file=file)
+            sent_message = await interaction.followup.send(filled_form, file=file, wait=True)
         else:
-            await interaction.followup.send(filled_form)
+            sent_message = await interaction.followup.send(filled_form, wait=True)
 
-        cat_text = f" ({cat_name})"
-        if deleted_count > 0:
-            await interaction.followup.send(f"✅ '{title}'{cat_text} 리뷰가 수정되었습니다.", ephemeral=True)
-        else:
-            await interaction.followup.send(f"✅ '{title}'{cat_text} 리뷰가 수정되었습니다. (기존 메시지를 찾지 못함)", ephemeral=True)
+        if self.review_data.get('id') and sent_message:
+            self.db.update_message_id(
+                self.review_data['id'],
+                sent_message.id,
+                interaction.channel_id
+            )
+
+        await interaction.followup.send(
+            f"✅ '{title}' ({cat_name}) 리뷰가 수정되었습니다. (기존 메시지를 찾지 못해 새로 전송)",
+            ephemeral=True
+        )
 
 
 # ==================== Bot Class ====================
@@ -620,6 +717,8 @@ class MyBot(commands.Bot):
         self.tree.add_command(news_command)
         self.tree.add_command(delete_review_command)
         self.tree.add_command(edit_review_command)
+        self.tree.add_command(edit_review_context)
+        self.tree.add_command(delete_review_context)
         await self.tree.sync()
 
         # 뉴스 스케줄러 시작
@@ -770,9 +869,25 @@ async def news_command(interaction: discord.Interaction):
 async def delete_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None):
     await interaction.response.defer(ephemeral=True)
 
+    # 삭제 전 기존 데이터 조회 (로그용)
+    review = bot.db.get_user_review(interaction.user.id, 제목, 카테고리)
+
     deleted = bot.db.delete_review(interaction.user.id, 제목, 카테고리)
 
     if deleted:
+        # 삭제 로그 기록
+        if review:
+            bot.db.log_review_action(
+                user_id=interaction.user.id,
+                username=interaction.user.display_name,
+                action='delete',
+                movie_title=제목,
+                category=review.get('category', 카테고리),
+                old_score=review['score'],
+                old_one_line_review=review['one_line_review'],
+                old_additional_comment=review.get('additional_comment')
+            )
+
         cat_text = f" ({CATEGORY_NAME.get(카테고리, '')})" if 카테고리 else ""
 
         # 채널에서 메시지 삭제 시도
@@ -826,6 +941,106 @@ async def edit_review_command(interaction: discord.Interaction, 제목: str, 카
         interaction.user.display_name
     )
     await interaction.response.send_modal(modal)
+
+
+# ==================== Context Menu Commands ====================
+
+@discord.app_commands.context_menu(name="리뷰 수정")
+async def edit_review_context(interaction: discord.Interaction, message: discord.Message):
+    # 봇이 보낸 메시지인지 확인
+    if message.author != interaction.client.user:
+        await interaction.response.send_message("❌ 봇이 보낸 리뷰 메시지만 수정할 수 있습니다.", ephemeral=True)
+        return
+
+    # 메시지에서 title, category 파싱
+    title, category = parse_review_message(message.content)
+    if not title or not category:
+        await interaction.response.send_message("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
+        return
+
+    # DB에서 리뷰 조회 (소유권 확인)
+    review = bot.db.get_user_review(interaction.user.id, title, category)
+    if not review:
+        await interaction.response.send_message(
+            f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
+        )
+        return
+
+    if not is_current_review_message(review, message):
+        await interaction.response.send_message(
+            "❌ 최신 리뷰 메시지에서만 수정할 수 있습니다. 가장 최근에 전송된 리뷰 메시지로 다시 시도해주세요.",
+            ephemeral=True
+        )
+        return
+
+    # EditReviewForm 모달 표시 (target_message 전달)
+    modal = EditReviewForm(
+        bot.db,
+        review,
+        interaction.channel,
+        interaction.user.id,
+        interaction.user.display_name,
+        target_message=message
+    )
+    await interaction.response.send_modal(modal)
+
+
+@discord.app_commands.context_menu(name="리뷰 삭제")
+async def delete_review_context(interaction: discord.Interaction, message: discord.Message):
+    # 봇이 보낸 메시지인지 확인
+    if message.author != interaction.client.user:
+        await interaction.response.send_message("❌ 봇이 보낸 리뷰 메시지만 삭제할 수 있습니다.", ephemeral=True)
+        return
+
+    # 메시지에서 title, category 파싱
+    title, category = parse_review_message(message.content)
+    if not title or not category:
+        await interaction.response.send_message("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
+        return
+
+    # DB에서 리뷰 조회 (소유권 확인)
+    review = bot.db.get_user_review(interaction.user.id, title, category)
+    if not review:
+        await interaction.response.send_message(
+            f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
+        )
+        return
+
+    if not is_current_review_message(review, message):
+        await interaction.response.send_message(
+            "❌ 최신 리뷰 메시지에서만 삭제할 수 있습니다. 가장 최근에 전송된 리뷰 메시지로 다시 시도해주세요.",
+            ephemeral=True
+        )
+        return
+
+    # DB 삭제
+    deleted = bot.db.delete_review(interaction.user.id, title, category)
+    if not deleted:
+        await interaction.response.send_message("❌ 리뷰 삭제에 실패했습니다.", ephemeral=True)
+        return
+
+    # 삭제 로그 기록
+    bot.db.log_review_action(
+        user_id=interaction.user.id,
+        username=interaction.user.display_name,
+        action='delete',
+        movie_title=title,
+        category=category,
+        old_score=review['score'],
+        old_one_line_review=review['one_line_review'],
+        old_additional_comment=review.get('additional_comment')
+    )
+
+    # 메시지 삭제
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"[ERROR] delete_review_context() 메시지 삭제 실패: {e}")
+
+    cat_name = CATEGORY_NAME.get(category, "")
+    await interaction.response.send_message(
+        f"✅ '{title}' ({cat_name}) 리뷰가 삭제되었습니다.", ephemeral=True
+    )
 
 
 bot.run(Token)

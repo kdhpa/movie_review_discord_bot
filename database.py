@@ -64,12 +64,47 @@ class Database:
                 END $$;
             ''')
 
+            # 기존 테이블에 message_id, channel_id 컬럼 추가 (이미 존재하면 무시)
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN message_id BIGINT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN channel_id BIGINT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+
             # 인덱스 생성 (이미 존재하면 무시됨)
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_user_id ON reviews(user_id)
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_movie_title ON reviews(movie_title)
+            ''')
+
+            # review_logs 테이블 생성
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS review_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    action TEXT NOT NULL,
+                    movie_title TEXT NOT NULL,
+                    category TEXT,
+                    old_score REAL,
+                    old_one_line_review TEXT,
+                    old_additional_comment TEXT,
+                    new_score REAL,
+                    new_one_line_review TEXT,
+                    new_additional_comment TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
             ''')
 
             self.conn.commit()
@@ -79,7 +114,8 @@ class Database:
             print(f"❌ Table creation failed: {e}")
 
     def save_review(self, user_id, username, movie_title, movie_year, director,
-                   score, one_line_review, additional_comment, category='movie', img_url=None):
+                   score, one_line_review, additional_comment, category='movie', img_url=None,
+                   message_id=None, channel_id=None):
         """리뷰 저장"""
         try:
             with get_conn() as conn:
@@ -87,19 +123,36 @@ class Database:
                     cursor.execute('''
                         INSERT INTO reviews
                         (user_id, username, movie_title, movie_year, director, score,
-                         one_line_review, additional_comment, category, img_url)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         one_line_review, additional_comment, category, img_url,
+                         message_id, channel_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     ''', (
                         user_id, username, movie_title, movie_year,
                         director, score, one_line_review, additional_comment,
-                        category, img_url
+                        category, img_url, message_id, channel_id
                     ))
 
                     return cursor.fetchone()[0]
         except Exception as e:
             print(f"❌ Failed to save review: {e}")
             return None
+
+    def update_message_id(self, review_id, message_id, channel_id):
+        """리뷰의 message_id, channel_id 업데이트"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        UPDATE reviews
+                        SET message_id = %s, channel_id = %s
+                        WHERE id = %s
+                    ''', (message_id, channel_id, review_id))
+                    conn.commit()
+                    return True
+        except Exception as e:
+            print(f"❌ Failed to update message_id: {e}")
+            return False
 
     def has_review(self, user_id, movie_title, category='movie'):
         """유저가 해당 콘텐츠에 리뷰를 작성했는지 확인"""
@@ -206,15 +259,17 @@ class Database:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     if category:
                         cursor.execute('''
-                            SELECT movie_title, movie_year, director, score,
-                                   one_line_review, additional_comment, category, img_url
+                            SELECT id, movie_title, movie_year, director, score,
+                                   one_line_review, additional_comment, category, img_url,
+                                   message_id, channel_id
                             FROM reviews
                             WHERE user_id = %s AND movie_title = %s AND category = %s
                         ''', (user_id, title, category))
                     else:
                         cursor.execute('''
-                            SELECT movie_title, movie_year, director, score,
-                                   one_line_review, additional_comment, category, img_url
+                            SELECT id, movie_title, movie_year, director, score,
+                                   one_line_review, additional_comment, category, img_url,
+                                   message_id, channel_id
                             FROM reviews
                             WHERE user_id = %s AND movie_title = %s
                         ''', (user_id, title))
@@ -249,4 +304,29 @@ class Database:
                     return updated is not None
         except Exception as e:
             print(f"❌ Failed to update review: {e}")
+            return False
+
+    def log_review_action(self, user_id, username, action, movie_title, category,
+                          old_score, old_one_line_review, old_additional_comment,
+                          new_score=None, new_one_line_review=None, new_additional_comment=None):
+        """리뷰 수정/삭제 로그 기록"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        INSERT INTO review_logs
+                        (user_id, username, action, movie_title, category,
+                         old_score, old_one_line_review, old_additional_comment,
+                         new_score, new_one_line_review, new_additional_comment)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ''', (
+                        user_id, username, action, movie_title, category,
+                        old_score, old_one_line_review, old_additional_comment,
+                        new_score, new_one_line_review, new_additional_comment
+                    ))
+                    conn.commit()
+                    print(f"✅ Review log saved: {action} - {movie_title}")
+                    return True
+        except Exception as e:
+            print(f"❌ Failed to save review log: {e}")
             return False
