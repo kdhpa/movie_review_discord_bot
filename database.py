@@ -131,11 +131,21 @@ class Database:
                     user_id BIGINT NOT NULL,
                     username TEXT,
                     content TEXT NOT NULL,
+                    thread_message_id BIGINT,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_comments_review_id ON review_comments(review_id)
+            ''')
+
+            # 기존 테이블에 thread_message_id 컬럼 추가 (이미 존재하면 무시)
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_comments ADD COLUMN thread_message_id BIGINT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
             ''')
 
             self.conn.commit()
@@ -449,20 +459,35 @@ class Database:
             print(f"❌ Failed to get user reaction: {e}")
             return None
 
-    def add_comment(self, review_id, user_id, username, content):
+    def add_comment(self, review_id, user_id, username, content, thread_message_id=None):
         """코멘트 추가"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute('''
-                        INSERT INTO review_comments (review_id, user_id, username, content)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO review_comments (review_id, user_id, username, content, thread_message_id)
+                        VALUES (%s, %s, %s, %s, %s)
                         RETURNING id
-                    ''', (review_id, user_id, username, content))
+                    ''', (review_id, user_id, username, content, thread_message_id))
                     conn.commit()
                     return cursor.fetchone()[0]
         except Exception as e:
             print(f"❌ Failed to add comment: {e}")
+            return None
+
+    def get_user_comment_message_id(self, review_id, user_id):
+        """사용자의 해당 리뷰 코멘트의 thread_message_id 조회"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT thread_message_id FROM review_comments
+                        WHERE review_id = %s AND user_id = %s
+                    ''', (review_id, user_id))
+                    result = cursor.fetchone()
+                    return result[0] if result else None
+        except Exception as e:
+            print(f"❌ Failed to get user comment message_id: {e}")
             return None
 
     def get_comments(self, review_id, limit=20):
@@ -494,6 +519,35 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to get comment count: {e}")
             return 0
+
+    def has_user_comment(self, review_id, user_id):
+        """사용자가 해당 리뷰에 코멘트를 남겼는지 확인"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT id FROM review_comments
+                        WHERE review_id = %s AND user_id = %s
+                    ''', (review_id, user_id))
+                    return cursor.fetchone() is not None
+        except Exception as e:
+            print(f"❌ Failed to check user comment: {e}")
+            return False
+
+    def delete_user_comment(self, review_id, user_id):
+        """사용자의 해당 리뷰 코멘트 삭제"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        DELETE FROM review_comments
+                        WHERE review_id = %s AND user_id = %s
+                    ''', (review_id, user_id))
+                    conn.commit()
+                    return True
+        except Exception as e:
+            print(f"❌ Failed to delete user comment: {e}")
+            return False
 
     def get_review_ranking(self, limit=10, category=None):
         """반응 많은 리뷰 랭킹"""

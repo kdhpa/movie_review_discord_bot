@@ -13,7 +13,7 @@ REACTION_TYPES = {
 
 def _make_reaction_button(rtype, info, count=0):
     """Create a reaction button with emoji + label, showing count if > 0."""
-    label = info['label'] if count == 0 else f"{info['label']} {count}"
+    label = info['label'] if count == 0 else f"{info['label']} : {count}"
     return discord.ui.Button(
         style=discord.ButtonStyle.secondary,
         label=label,
@@ -48,7 +48,7 @@ class ReviewReactionView(discord.ui.View):
                 info = REACTION_TYPES.get(rtype)
                 if info:
                     count = reaction_counts.get(rtype, 0)
-                    child.label = info['label'] if count == 0 else f"{info['label']} {count}"
+                    child.label = info['label'] if count == 0 else f"{info['label']} : {count}"
 
     def _make_reaction_callback(self, rtype):
         async def callback(interaction: discord.Interaction):
@@ -60,8 +60,49 @@ class ReviewReactionView(discord.ui.View):
                 )
                 return
 
+            # Get user's current reaction
+            user_reaction = db.get_user_reaction(review['id'], interaction.user.id)
+
+            # Show ephemeral status view with user's reaction highlighted
+            status_view = ReactionStatusView(review, interaction.message, user_reaction)
+            await interaction.response.send_message(
+                f"🎬 **{review['movie_title']}** 리뷰 반응\n"
+                f"내 반응: {REACTION_TYPES[user_reaction]['emoji'] + ' ' + REACTION_TYPES[user_reaction]['label'] if user_reaction else '없음'}",
+                view=status_view,
+                ephemeral=True
+            )
+
+        return callback
+
+
+class ReactionStatusView(discord.ui.View):
+    """Ephemeral view showing user's reaction status with selected reaction in blue."""
+
+    def __init__(self, review, original_message, user_reaction):
+        super().__init__(timeout=180)  # 3 minutes timeout for ephemeral
+        self.review = review
+        self.original_message = original_message
+        self.user_reaction = user_reaction
+        self._build_buttons()
+
+    def _build_buttons(self):
+        for rtype, info in REACTION_TYPES.items():
+            # Use primary (blue) if this is user's current reaction, else secondary (gray)
+            style = discord.ButtonStyle.primary if rtype == self.user_reaction else discord.ButtonStyle.secondary
+            btn = discord.ui.Button(
+                style=style,
+                label=info['label'],
+                emoji=info['emoji'],
+                custom_id=f"status_reaction:{rtype}",
+                row=info['row'],
+            )
+            btn.callback = self._make_status_callback(rtype)
+            self.add_item(btn)
+
+    def _make_status_callback(self, rtype):
+        async def callback(interaction: discord.Interaction):
             info = REACTION_TYPES[rtype]
-            modal = ReactionCommentModal(review, interaction.message, rtype, info)
+            modal = ReactionCommentModal(self.review, self.original_message, rtype, info)
             await interaction.response.send_modal(modal)
 
         return callback
@@ -111,6 +152,15 @@ class ReactionCommentModal(discord.ui.Modal):
         # Handle comment if provided
         comment = self.comment_input.value.strip()
         if comment:
+            # Check if user already has a comment on this review
+            is_edit = db.has_user_comment(self.review['id'], interaction.user.id)
+            old_message_id = None
+            if is_edit:
+                # Get old message id before deleting
+                old_message_id = db.get_user_comment_message_id(self.review['id'], interaction.user.id)
+                # Delete old comment from DB
+                db.delete_user_comment(self.review['id'], interaction.user.id)
+
             try:
                 # Check if thread already exists
                 thread = self.message.thread
@@ -135,14 +185,31 @@ class ReactionCommentModal(discord.ui.Modal):
                         f"반응 버튼을 눌러 코멘트를 남겨주세요!"
                     )
 
+                # Delete old thread message if editing
+                if is_edit and old_message_id:
+                    try:
+                        old_msg = await thread.fetch_message(old_message_id)
+                        await old_msg.delete()
+                    except discord.NotFound:
+                        pass  # Message already deleted
+                    except Exception as e:
+                        print(f"[WARN] Failed to delete old comment message: {e}")
+
                 # Send the comment with reaction info
-                await thread.send(
+                sent_msg = await thread.send(
                     f"{self.info['emoji']} **{interaction.user.display_name}**: {comment}"
                 )
 
+                # Save comment to DB with thread_message_id
+                db.add_comment(
+                    self.review['id'], interaction.user.id,
+                    interaction.user.display_name, comment, sent_msg.id
+                )
+
                 action_msg = "추가" if action == "added" else "취소"
+                comment_msg = "수정" if is_edit else "등록"
                 await interaction.followup.send(
-                    f"✅ {self.info['emoji']} 반응이 {action_msg}되었고, 코멘트가 등록되었습니다!\n"
+                    f"✅ {self.info['emoji']} 반응이 {action_msg}되었고, 코멘트가 {comment_msg}되었습니다!\n"
                     f"👉 {thread.mention}",
                     ephemeral=True
                 )
