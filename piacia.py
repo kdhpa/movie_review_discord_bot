@@ -40,6 +40,27 @@ def parse_review_message(content):
     return None, None
 
 
+def parse_review_detail(content):
+    """리뷰 메시지에서 director/author, year/platform 파싱"""
+    lines = content.split('\n')
+    if len(lines) < 3:
+        return None, None
+
+    director = None
+    for prefix in ['🎥감독: ', '✍️작가: ']:
+        if lines[1].startswith(prefix):
+            director = lines[1][len(prefix):].strip()
+            break
+
+    year = None
+    for prefix in ['📅개봉년도: ', '📅연재년도: ', '📍플랫폼: ']:
+        if lines[2].startswith(prefix):
+            year = lines[2][len(prefix):].strip()
+            break
+
+    return director, year
+
+
 def is_current_review_message(review_data, message):
     """DB에 저장된 최신 리뷰 메시지인지 확인"""
     stored_message_id = review_data.get('message_id')
@@ -281,8 +302,81 @@ class MovieSelectView(discord.ui.View):
             item.disabled = True
 
 
+OTT_TYPE_NAME = {'flatrate': '🎬 구독 스트리밍', 'rent': '🏷️ 대여', 'buy': '💰 구매'}
+
+
+def _build_ott_embed(movie, providers):
+    emoji = CATEGORY_EMOJI.get(movie['category'], '🎬')
+    cat_name = CATEGORY_NAME.get(movie['category'], '영화')
+    embed = discord.Embed(title=f"{emoji} {movie['title']} ({movie['year']})", color=0x5865F2)
+    embed.description = f"**{cat_name}** | 한국 스트리밍 정보"
+    if movie.get('img_url'):
+        embed.set_thumbnail(url=movie['img_url'])
+    if not providers:
+        embed.add_field(name="❌ 스트리밍 정보 없음", value="현재 한국에서 이용 가능한 스트리밍/대여/구매 정보가 없습니다.", inline=False)
+    else:
+        for ptype in ('flatrate', 'rent', 'buy'):
+            items = providers.get(ptype, [])
+            if items:
+                embed.add_field(name=OTT_TYPE_NAME[ptype], value='\n'.join(f"• {i['name']}" for i in items), inline=False)
+        if providers.get('link'):
+            embed.add_field(name="🔗 자세히 보기", value=f"[JustWatch에서 보기]({providers['link']})", inline=False)
+    embed.set_footer(text="데이터 제공: TMDB / JustWatch")
+    return embed
+
+
+class OTTSelectMenu(discord.ui.Select):
+    """OTT 조회용 TMDB 검색 결과 선택 메뉴"""
+
+    def __init__(self, movies: list):
+        options = [
+            discord.SelectOption(
+                label=f"{movie['title']} ({movie['year']})",
+                description=f"{CATEGORY_NAME[movie['category']]}",
+                value=str(idx),
+                emoji=CATEGORY_EMOJI[movie['category']]
+            )
+            for idx, movie in enumerate(movies)
+        ]
+
+        super().__init__(
+            placeholder="검색된 작품을 선택하세요",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+
+        self.movies = movies
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_idx = int(self.values[0])
+        movie = self.movies[selected_idx]
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with aiohttp.ClientSession() as session:
+            providers = await ContentSearcher.fetch_watch_providers(
+                session, movie['tmdb_id'], movie['media_type']
+            )
+
+        embed = _build_ott_embed(movie, providers)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class OTTSelectView(discord.ui.View):
+    """OTT 조회용 TMDB 검색 결과 선택 View"""
+
+    def __init__(self, movies: list):
+        super().__init__(timeout=60.0)
+        self.add_item(OTTSelectMenu(movies))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
 class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
-    def __init__(self, db, category, author_id: int, id_name: str, author_name: str, prefetched_info: tuple = None):
+    def __init__(self, db, category, author_id: int, id_name: str, author_name: str, prefetched_info: tuple = None, prefetched_category: str = None):
         super().__init__()
         self.db = db
         self.category = category  # 'tmdb', 'manga', 'webtoon'
@@ -296,6 +390,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.comment = None
         # URL로 미리 가져온 만화 정보 (title, year, author, img_url)
         self.prefetched_info = prefetched_info
+        self.prefetched_category = prefetched_category
 
         if prefetched_info:
             # URL로 정보가 있어도 제목 필드 표시 (기본값으로 자동 추출 제목)
@@ -351,7 +446,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 'year': year,
                 'director': director,
                 'img_url': img_url,
-                'category': 'manga'
+                'category': self.prefetched_category or 'manga'
             }
 
             await _save_and_send_review(
@@ -717,7 +812,9 @@ class MyBot(commands.Bot):
         self.tree.add_command(news_command)
         self.tree.add_command(delete_review_command)
         self.tree.add_command(edit_review_command)
+        self.tree.add_command(ott_command)
         self.tree.add_command(edit_review_context)
+        self.tree.add_command(write_review_context)
         self.tree.add_command(delete_review_context)
         await self.tree.sync()
 
@@ -943,6 +1040,35 @@ async def edit_review_command(interaction: discord.Interaction, 제목: str, 카
     await interaction.response.send_modal(modal)
 
 
+@discord.app_commands.command(name="어디서봐", description="작품의 OTT/스트리밍 정보를 조회합니다.")
+@discord.app_commands.describe(제목="검색할 작품 제목")
+async def ott_command(interaction: discord.Interaction, 제목: str):
+    await interaction.response.defer(ephemeral=True)
+
+    async with aiohttp.ClientSession() as session:
+        movies = await ContentSearcher.search_tmdb_multiple(session, 제목)
+
+        if not movies:
+            await interaction.followup.send(f"❌ '{제목}'를 찾을 수 없습니다. 정확한 제목으로 다시 시도해주세요.", ephemeral=True)
+            return
+
+        if len(movies) == 1:
+            movie = movies[0]
+            providers = await ContentSearcher.fetch_watch_providers(
+                session, movie['tmdb_id'], movie['media_type']
+            )
+            embed = _build_ott_embed(movie, providers)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+    view = OTTSelectView(movies)
+    await interaction.followup.send(
+        f"🔍 '{제목}' 검색 결과 {len(movies)}개입니다. 작품을 선택하세요:",
+        view=view,
+        ephemeral=True
+    )
+
+
 # ==================== Context Menu Commands ====================
 
 @discord.app_commands.context_menu(name="리뷰 수정")
@@ -981,6 +1107,44 @@ async def edit_review_context(interaction: discord.Interaction, message: discord
         interaction.user.id,
         interaction.user.display_name,
         target_message=message
+    )
+    await interaction.response.send_modal(modal)
+
+
+# DB category → search category 매핑
+CATEGORY_TO_SEARCH = {'movie': 'tmdb', 'drama': 'tmdb', 'anime': 'tmdb', 'manga': 'manga', 'webtoon': 'webtoon'}
+
+
+@discord.app_commands.context_menu(name="나도 쓰기")
+async def write_review_context(interaction: discord.Interaction, message: discord.Message):
+    # 봇이 보낸 메시지인지 확인
+    if message.author != interaction.client.user:
+        await interaction.response.send_message("❌ 봇이 보낸 리뷰 메시지에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    # 메시지에서 title, category 파싱
+    title, db_category = parse_review_message(message.content)
+    if not title or not db_category:
+        await interaction.response.send_message("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
+        return
+
+    # director, year 파싱
+    director, year = parse_review_detail(message.content)
+
+    # 포스터 이미지 URL 획득
+    img_url = message.attachments[0].url if message.attachments else None
+
+    search_category = CATEGORY_TO_SEARCH[db_category]
+    prefetched_info = (title, year, director, img_url)
+
+    modal = ReviewForm(
+        bot.db,
+        search_category,
+        interaction.user.id,
+        str(interaction.user),
+        interaction.user.display_name,
+        prefetched_info=prefetched_info,
+        prefetched_category=db_category
     )
     await interaction.response.send_modal(modal)
 

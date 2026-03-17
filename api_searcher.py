@@ -286,6 +286,27 @@ class ContentSearcher:
             return "정보 없음"
 
     @staticmethod
+    async def fetch_watch_providers(session, tmdb_id, media_type):
+        """TMDB Watch Providers API로 한국(KR) OTT 정보 조회"""
+        endpoint = 'movie' if media_type == 'movie' else 'tv'
+        url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}/watch/providers?api_key={TMDB_API_KEY}"
+        async with session.get(url) as response:
+            data = await response.json()
+        kr_data = data.get('results', {}).get('KR')
+        if not kr_data:
+            return None
+        providers = {}
+        for provider_type in ('flatrate', 'rent', 'buy'):
+            items = kr_data.get(provider_type, [])
+            if items:
+                providers[provider_type] = [
+                    {'name': item['provider_name'], 'logo_path': item.get('logo_path')}
+                    for item in items
+                ]
+        providers['link'] = kr_data.get('link')
+        return providers if any(k in providers for k in ('flatrate', 'rent', 'buy')) else None
+
+    @staticmethod
     def _extract_mangadex_id(url_or_name):
         """MangaDex URL에서 manga ID 추출 (UUID 형식)"""
         # https://mangadex.org/title/{uuid}/{slug} 형식
