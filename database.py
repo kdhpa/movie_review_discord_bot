@@ -55,6 +55,15 @@ class Database:
                 END $$;
             ''')
 
+            # 기존 테이블에 img_url 컬럼 추가 (이미 존재하면 무시)
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN img_url TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+
             # 인덱스 생성 (이미 존재하면 무시됨)
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_user_id ON reviews(user_id)
@@ -70,7 +79,7 @@ class Database:
             print(f"❌ Table creation failed: {e}")
 
     def save_review(self, user_id, username, movie_title, movie_year, director,
-                   score, one_line_review, additional_comment, category='movie'):
+                   score, one_line_review, additional_comment, category='movie', img_url=None):
         """리뷰 저장"""
         try:
             with get_conn() as conn:
@@ -78,13 +87,13 @@ class Database:
                     cursor.execute('''
                         INSERT INTO reviews
                         (user_id, username, movie_title, movie_year, director, score,
-                         one_line_review, additional_comment, category)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         one_line_review, additional_comment, category, img_url)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     ''', (
                         user_id, username, movie_title, movie_year,
                         director, score, one_line_review, additional_comment,
-                        category
+                        category, img_url
                     ))
 
                     return cursor.fetchone()[0]
@@ -198,14 +207,14 @@ class Database:
                     if category:
                         cursor.execute('''
                             SELECT movie_title, movie_year, director, score,
-                                   one_line_review, additional_comment, category
+                                   one_line_review, additional_comment, category, img_url
                             FROM reviews
                             WHERE user_id = %s AND movie_title = %s AND category = %s
                         ''', (user_id, title, category))
                     else:
                         cursor.execute('''
                             SELECT movie_title, movie_year, director, score,
-                                   one_line_review, additional_comment, category
+                                   one_line_review, additional_comment, category, img_url
                             FROM reviews
                             WHERE user_id = %s AND movie_title = %s
                         ''', (user_id, title))
@@ -215,17 +224,25 @@ class Database:
             print(f"❌ Failed to get user review: {e}")
             return None
 
-    def update_review(self, user_id, title, category, score, one_line_review, additional_comment):
+    def update_review(self, user_id, title, category, score, one_line_review, additional_comment, img_url=None):
         """리뷰 수정"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute('''
-                        UPDATE reviews
-                        SET score = %s, one_line_review = %s, additional_comment = %s
-                        WHERE user_id = %s AND movie_title = %s AND category = %s
-                        RETURNING id
-                    ''', (score, one_line_review, additional_comment, user_id, title, category))
+                    if img_url:
+                        cursor.execute('''
+                            UPDATE reviews
+                            SET score = %s, one_line_review = %s, additional_comment = %s, img_url = %s
+                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                            RETURNING id
+                        ''', (score, one_line_review, additional_comment, img_url, user_id, title, category))
+                    else:
+                        cursor.execute('''
+                            UPDATE reviews
+                            SET score = %s, one_line_review = %s, additional_comment = %s
+                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                            RETURNING id
+                        ''', (score, one_line_review, additional_comment, user_id, title, category))
 
                     updated = cursor.fetchone()
                     conn.commit()

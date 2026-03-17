@@ -82,7 +82,8 @@ async def _save_and_send_review(
         score=score_float,
         one_line_review=line_comment,
         additional_comment=comment,
-        category=db_category
+        category=db_category,
+        img_url=img_url
     )
     print(f"[DEBUG] _save_and_send_review() DB 저장 완료")
 
@@ -537,9 +538,57 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
         if additional_comment:
             filled_form += f"\n\n📝추가 코멘트 : {additional_comment}"
 
-        filled_form += "\n✏️ (수정됨)"
+        # 이미지 가져오기
+        img_url = self.review_data.get('img_url')
 
-        await interaction.followup.send(filled_form)
+        # img_url이 없으면 (기존 리뷰) 카테고리별 API 재검색
+        if not img_url:
+            print(f"[DEBUG] EditReviewForm.on_submit() img_url 없음 - API 재검색 시도")
+            async with aiohttp.ClientSession() as session:
+                if search_category == 'tmdb':
+                    _, _, _, img_url, _ = await ContentSearcher._search_tmdb_direct(session, title)
+                elif search_category == 'manga':
+                    _, _, _, img_url = await ContentSearcher.search_manga(session, title)
+                else:  # webtoon
+                    _, _, _, img_url = await ContentSearcher.search_webtoon(session, title)
+
+            # 재검색으로 획득한 img_url을 DB에도 저장
+            if img_url:
+                print(f"[DEBUG] EditReviewForm.on_submit() 재검색으로 img_url 획득 - DB 업데이트")
+                self.db.update_review(
+                    self.user_id, title, category,
+                    score, one_line_review, additional_comment, img_url=img_url
+                )
+
+        # 이미지 다운로드 및 전송
+        img_data = None
+        if img_url:
+            print(f"[DEBUG] EditReviewForm.on_submit() 이미지 다운로드 시작 - URL: {img_url}")
+            timeout = aiohttp.ClientTimeout(total=30)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': img_url
+            }
+
+            for attempt in range(3):
+                try:
+                    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                        async with session.get(img_url) as img_response:
+                            if img_response.status == 200:
+                                img_data = await img_response.read()
+                                print(f"[DEBUG] EditReviewForm.on_submit() 이미지 다운로드 성공 (크기: {len(img_data)} bytes)")
+                                break
+                except Exception as e:
+                    print(f"[ERROR] EditReviewForm.on_submit() 이미지 다운로드 중 오류 (시도 {attempt + 1}): {e}")
+
+                if attempt < 2:
+                    await asyncio.sleep(1)
+
+        if img_data:
+            file = discord.File(io.BytesIO(img_data), filename="image.jpg")
+            await interaction.followup.send(filled_form, file=file)
+        else:
+            await interaction.followup.send(filled_form)
 
         cat_text = f" ({cat_name})"
         if deleted_count > 0:
