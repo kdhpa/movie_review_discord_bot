@@ -11,6 +11,7 @@ from database import Database
 from api_searcher import ContentSearcher
 from news_scheduler import NewsScheduler
 from assistant_service import AssistantService
+from review_interaction import ReviewReactionView
 import io
 import os
 
@@ -210,13 +211,14 @@ async def _save_and_send_review(
             if attempt < 2:
                 await asyncio.sleep(1)
 
+    view = ReviewReactionView()
     if img_data:
         file = discord.File(io.BytesIO(img_data), filename="image.jpg")
-        sent_message = await interaction.followup.send(filled_form, file=file, wait=True)
+        sent_message = await interaction.followup.send(filled_form, file=file, view=view, wait=True)
         print(f"[DEBUG] _save_and_send_review() 이미지 포함 메시지 전송 완료")
     else:
         print(f"[DEBUG] _save_and_send_review() 이미지 없이 텍스트만 전송")
-        sent_message = await interaction.followup.send(filled_form, wait=True)
+        sent_message = await interaction.followup.send(filled_form, view=view, wait=True)
 
     # message_id 저장
     if review_id and sent_message:
@@ -715,7 +717,13 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
         # 메시지를 찾은 경우: in-place edit (첨부파일 자동 보존)
         if target_msg:
             try:
-                await target_msg.edit(content=filled_form)
+                # 기존 반응/코멘트 카운트 유지
+                edit_view = ReviewReactionView()
+                if self.review_data.get('id'):
+                    reaction_counts = self.db.get_reaction_counts(self.review_data['id'])
+                    comment_count = self.db.get_comment_count(self.review_data['id'])
+                    edit_view.update_counts(reaction_counts, comment_count)
+                await target_msg.edit(content=filled_form, view=edit_view)
                 if self.review_data.get('id'):
                     self.db.update_message_id(
                         self.review_data['id'],
@@ -770,11 +778,17 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                 if attempt < 2:
                     await asyncio.sleep(1)
 
+        fallback_view = ReviewReactionView()
+        if self.review_data.get('id'):
+            fb_counts = self.db.get_reaction_counts(self.review_data['id'])
+            fb_comment_count = self.db.get_comment_count(self.review_data['id'])
+            fallback_view.update_counts(fb_counts, fb_comment_count)
+
         if img_data:
             file = discord.File(io.BytesIO(img_data), filename="image.jpg")
-            sent_message = await interaction.followup.send(filled_form, file=file, wait=True)
+            sent_message = await interaction.followup.send(filled_form, file=file, view=fallback_view, wait=True)
         else:
-            sent_message = await interaction.followup.send(filled_form, wait=True)
+            sent_message = await interaction.followup.send(filled_form, view=fallback_view, wait=True)
 
         if self.review_data.get('id') and sent_message:
             self.db.update_message_id(
@@ -802,6 +816,9 @@ class MyBot(commands.Bot):
         print(f'Logged in as {self.user}')
 
     async def setup_hook(self):
+        # Persistent view 등록 (봇 재시작 후에도 기존 버튼 동작)
+        self.add_view(ReviewReactionView())
+
         # Assistant Service 초기화
         self.assistant_service = AssistantService(self)
         await self.assistant_service.setup_gemini()
@@ -816,6 +833,7 @@ class MyBot(commands.Bot):
         self.tree.add_command(edit_review_context)
         self.tree.add_command(write_review_context)
         self.tree.add_command(delete_review_context)
+        self.tree.add_command(ranking_command)
         await self.tree.sync()
 
         # 뉴스 스케줄러 시작
@@ -1205,6 +1223,58 @@ async def delete_review_context(interaction: discord.Interaction, message: disco
     await interaction.response.send_message(
         f"✅ '{title}' ({cat_name}) 리뷰가 삭제되었습니다.", ephemeral=True
     )
+
+
+# ==================== 리뷰 랭킹 ====================
+
+from review_interaction import REACTION_TYPES
+
+@discord.app_commands.command(name="리뷰랭킹", description="반응이 많은 인기 리뷰 TOP 10을 조회합니다.")
+@discord.app_commands.describe(카테고리="카테고리별 필터링 (선택)")
+@discord.app_commands.choices(카테고리=[
+    discord.app_commands.Choice(name="🎬 영화", value="movie"),
+    discord.app_commands.Choice(name="📺 드라마", value="drama"),
+    discord.app_commands.Choice(name="🎌 애니", value="anime"),
+    discord.app_commands.Choice(name="📚 만화", value="manga"),
+    discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
+])
+async def ranking_command(interaction: discord.Interaction, 카테고리: discord.app_commands.Choice[str] = None):
+    await interaction.response.defer()
+
+    category = 카테고리.value if 카테고리 else None
+    rankings = bot.db.get_review_ranking(limit=10, category=category)
+
+    if not rankings:
+        await interaction.followup.send("📊 아직 반응이 달린 리뷰가 없습니다.", ephemeral=True)
+        return
+
+    cat_label = 카테고리.name if 카테고리 else "전체"
+    embed = discord.Embed(
+        title=f"🏆 리뷰 랭킹 TOP {len(rankings)} ({cat_label})",
+        color=discord.Color.gold(),
+    )
+
+    for idx, review in enumerate(rankings, 1):
+        emoji = CATEGORY_EMOJI.get(review['category'], '🎬')
+        cat_name = CATEGORY_NAME.get(review['category'], '영화')
+
+        # Reaction breakdown
+        counts = bot.db.get_reaction_counts(review['id'])
+        breakdown = " ".join(
+            f"{REACTION_TYPES[rt]['emoji']}{cnt}"
+            for rt, cnt in counts.items() if cnt > 0
+        )
+
+        score_str = return_score_emoji(review['score'])
+        field_name = f"{idx}. {emoji} {review['movie_title']}"
+        field_value = (
+            f"{score_str} | {cat_name}\n"
+            f"✍️ {review['username']} | 💬 \"{review['one_line_review']}\"\n"
+            f"반응: {breakdown} (총 {review['reaction_count']}개)"
+        )
+        embed.add_field(name=field_name, value=field_value, inline=False)
+
+    await interaction.followup.send(embed=embed)
 
 
 bot.run(Token)

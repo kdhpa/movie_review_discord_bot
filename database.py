@@ -107,6 +107,37 @@ class Database:
                 )
             ''')
 
+            # review_reactions 테이블 생성
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS review_reactions (
+                    id SERIAL PRIMARY KEY,
+                    review_id INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    reaction_type TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(review_id, user_id)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_reactions_review_id ON review_reactions(review_id)
+            ''')
+
+            # review_comments 테이블 생성
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS review_comments (
+                    id SERIAL PRIMARY KEY,
+                    review_id INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_comments_review_id ON review_comments(review_id)
+            ''')
+
             self.conn.commit()
             cursor.close()
             print("✅ Tables created/verified successfully")
@@ -330,3 +361,167 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to save review log: {e}")
             return False
+
+    def get_review_by_message_id(self, message_id):
+        """message_id로 리뷰 조회"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        SELECT * FROM reviews WHERE message_id = %s
+                    ''', (message_id,))
+                    return cursor.fetchone()
+        except Exception as e:
+            print(f"❌ Failed to get review by message_id: {e}")
+            return None
+
+    def toggle_reaction(self, review_id, user_id, username, reaction_type):
+        """반응 토글: 같으면 삭제, 다르면 변경, 없으면 추가"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    # 기존 반응 조회
+                    cursor.execute('''
+                        SELECT reaction_type FROM review_reactions
+                        WHERE review_id = %s AND user_id = %s
+                    ''', (review_id, user_id))
+                    existing = cursor.fetchone()
+
+                    if existing:
+                        if existing[0] == reaction_type:
+                            # 같은 반응 → 삭제
+                            cursor.execute('''
+                                DELETE FROM review_reactions
+                                WHERE review_id = %s AND user_id = %s
+                            ''', (review_id, user_id))
+                            conn.commit()
+                            return ('removed', reaction_type)
+                        else:
+                            # 다른 반응 → 변경
+                            old_type = existing[0]
+                            cursor.execute('''
+                                UPDATE review_reactions
+                                SET reaction_type = %s, username = %s, created_at = NOW()
+                                WHERE review_id = %s AND user_id = %s
+                            ''', (reaction_type, username, review_id, user_id))
+                            conn.commit()
+                            return ('changed', old_type)
+                    else:
+                        # 새 반응 추가
+                        cursor.execute('''
+                            INSERT INTO review_reactions (review_id, user_id, username, reaction_type)
+                            VALUES (%s, %s, %s, %s)
+                        ''', (review_id, user_id, username, reaction_type))
+                        conn.commit()
+                        return ('added', reaction_type)
+        except Exception as e:
+            print(f"❌ Failed to toggle reaction: {e}")
+            return (None, None)
+
+    def get_reaction_counts(self, review_id):
+        """리뷰별 반응 카운트"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT reaction_type, COUNT(*) as cnt
+                        FROM review_reactions
+                        WHERE review_id = %s
+                        GROUP BY reaction_type
+                    ''', (review_id,))
+                    return {row[0]: row[1] for row in cursor.fetchall()}
+        except Exception as e:
+            print(f"❌ Failed to get reaction counts: {e}")
+            return {}
+
+    def get_user_reaction(self, review_id, user_id):
+        """유저의 특정 리뷰 반응 조회"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT reaction_type FROM review_reactions
+                        WHERE review_id = %s AND user_id = %s
+                    ''', (review_id, user_id))
+                    result = cursor.fetchone()
+                    return result[0] if result else None
+        except Exception as e:
+            print(f"❌ Failed to get user reaction: {e}")
+            return None
+
+    def add_comment(self, review_id, user_id, username, content):
+        """코멘트 추가"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        INSERT INTO review_comments (review_id, user_id, username, content)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                    ''', (review_id, user_id, username, content))
+                    conn.commit()
+                    return cursor.fetchone()[0]
+        except Exception as e:
+            print(f"❌ Failed to add comment: {e}")
+            return None
+
+    def get_comments(self, review_id, limit=20):
+        """리뷰 코멘트 조회"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        SELECT * FROM review_comments
+                        WHERE review_id = %s
+                        ORDER BY created_at ASC
+                        LIMIT %s
+                    ''', (review_id, limit))
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to get comments: {e}")
+            return []
+
+    def get_comment_count(self, review_id):
+        """리뷰 코멘트 수"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM review_comments
+                        WHERE review_id = %s
+                    ''', (review_id,))
+                    return cursor.fetchone()[0]
+        except Exception as e:
+            print(f"❌ Failed to get comment count: {e}")
+            return 0
+
+    def get_review_ranking(self, limit=10, category=None):
+        """반응 많은 리뷰 랭킹"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    if category:
+                        cursor.execute('''
+                            SELECT r.*, COUNT(rr.id) as reaction_count
+                            FROM reviews r
+                            LEFT JOIN review_reactions rr ON r.id = rr.review_id
+                            WHERE r.category = %s
+                            GROUP BY r.id
+                            HAVING COUNT(rr.id) > 0
+                            ORDER BY reaction_count DESC, r.created_at DESC
+                            LIMIT %s
+                        ''', (category, limit))
+                    else:
+                        cursor.execute('''
+                            SELECT r.*, COUNT(rr.id) as reaction_count
+                            FROM reviews r
+                            LEFT JOIN review_reactions rr ON r.id = rr.review_id
+                            GROUP BY r.id
+                            HAVING COUNT(rr.id) > 0
+                            ORDER BY reaction_count DESC, r.created_at DESC
+                            LIMIT %s
+                        ''', (limit,))
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to get review ranking: {e}")
+            return []
