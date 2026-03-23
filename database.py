@@ -5,6 +5,8 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+_NO_SEASON_FILTER = object()  # season 조건 미적용 표시용
+
 def get_conn():
     return psycopg2.connect(
         DATABASE_URL,
@@ -148,15 +150,41 @@ class Database:
                 END $$;
             ''')
 
+            # 기존 테이블에 season 컬럼 추가 (이미 존재하면 무시)
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN season INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_logs ADD COLUMN season INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+
             self.conn.commit()
             cursor.close()
             print("✅ Tables created/verified successfully")
         except Exception as e:
             print(f"❌ Table creation failed: {e}")
 
+    @staticmethod
+    def _build_season_clause(season):
+        """season 값에 따른 SQL 조건과 파라미터 반환"""
+        if season is _NO_SEASON_FILTER:
+            return "", ()
+        elif season is None:
+            return " AND season IS NULL", ()
+        else:
+            return " AND season = %s", (season,)
+
     def save_review(self, user_id, username, movie_title, movie_year, director,
                    score, one_line_review, additional_comment, category='movie', img_url=None,
-                   message_id=None, channel_id=None):
+                   message_id=None, channel_id=None, season=None):
         """리뷰 저장"""
         try:
             with get_conn() as conn:
@@ -165,13 +193,13 @@ class Database:
                         INSERT INTO reviews
                         (user_id, username, movie_title, movie_year, director, score,
                          one_line_review, additional_comment, category, img_url,
-                         message_id, channel_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         message_id, channel_id, season)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     ''', (
                         user_id, username, movie_title, movie_year,
                         director, score, one_line_review, additional_comment,
-                        category, img_url, message_id, channel_id
+                        category, img_url, message_id, channel_id, season
                     ))
 
                     return cursor.fetchone()[0]
@@ -195,15 +223,16 @@ class Database:
             print(f"❌ Failed to update message_id: {e}")
             return False
 
-    def has_review(self, user_id, movie_title, category='movie'):
+    def has_review(self, user_id, movie_title, category='movie', season=None):
         """유저가 해당 콘텐츠에 리뷰를 작성했는지 확인"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute('''
+                    season_clause, season_params = self._build_season_clause(season)
+                    cursor.execute(f'''
                         SELECT id FROM reviews
-                        WHERE user_id = %s AND movie_title = %s AND category = %s
-                    ''', (user_id, movie_title, category))
+                        WHERE user_id = %s AND movie_title = %s AND category = %s{season_clause}
+                    ''', (user_id, movie_title, category) + season_params)
 
                     result = cursor.fetchone()
                     return result is not None
@@ -237,29 +266,47 @@ class Database:
             return []
 
     def get_content_stats(self, title, category=None):
-        """콘텐츠별 평점 통계"""
+        """콘텐츠별 평점 통계 (effective score: 전체 리뷰 우선 > 시즌 평균)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     if category:
                         cursor.execute('''
+                            WITH effective_scores AS (
+                                SELECT user_id,
+                                    COALESCE(
+                                        MAX(CASE WHEN season IS NULL THEN score END),
+                                        AVG(CASE WHEN season IS NOT NULL THEN score END)
+                                    ) AS effective_score
+                                FROM reviews
+                                WHERE movie_title = %s AND category = %s
+                                GROUP BY user_id
+                            )
                             SELECT
                                 COUNT(*) as review_count,
-                                AVG(score) as avg_score,
-                                MAX(score) as max_score,
-                                MIN(score) as min_score
-                            FROM reviews
-                            WHERE movie_title = %s AND category = %s
+                                AVG(effective_score) as avg_score,
+                                MAX(effective_score) as max_score,
+                                MIN(effective_score) as min_score
+                            FROM effective_scores
                         ''', (title, category))
                     else:
                         cursor.execute('''
+                            WITH effective_scores AS (
+                                SELECT user_id,
+                                    COALESCE(
+                                        MAX(CASE WHEN season IS NULL THEN score END),
+                                        AVG(CASE WHEN season IS NOT NULL THEN score END)
+                                    ) AS effective_score
+                                FROM reviews
+                                WHERE movie_title = %s
+                                GROUP BY user_id
+                            )
                             SELECT
                                 COUNT(*) as review_count,
-                                AVG(score) as avg_score,
-                                MAX(score) as max_score,
-                                MIN(score) as min_score
-                            FROM reviews
-                            WHERE movie_title = %s
+                                AVG(effective_score) as avg_score,
+                                MAX(effective_score) as max_score,
+                                MIN(effective_score) as min_score
+                            FROM effective_scores
                         ''', (title,))
 
                     stats = cursor.fetchone()
@@ -268,23 +315,24 @@ class Database:
             print(f"❌ Failed to get content stats: {e}")
             return None
 
-    def delete_review(self, user_id, title, category=None):
+    def delete_review(self, user_id, title, category=None, season=_NO_SEASON_FILTER):
         """유저의 특정 콘텐츠 리뷰 삭제"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    season_clause, season_params = self._build_season_clause(season)
                     if category:
-                        cursor.execute('''
+                        cursor.execute(f'''
                             DELETE FROM reviews
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                            WHERE user_id = %s AND movie_title = %s AND category = %s{season_clause}
                             RETURNING id
-                        ''', (user_id, title, category))
+                        ''', (user_id, title, category) + season_params)
                     else:
-                        cursor.execute('''
+                        cursor.execute(f'''
                             DELETE FROM reviews
-                            WHERE user_id = %s AND movie_title = %s
+                            WHERE user_id = %s AND movie_title = %s{season_clause}
                             RETURNING id
-                        ''', (user_id, title))
+                        ''', (user_id, title) + season_params)
 
                     deleted = cursor.fetchone()
                     conn.commit()
@@ -293,52 +341,54 @@ class Database:
             print(f"❌ Failed to delete review: {e}")
             return False
 
-    def get_user_review(self, user_id, title, category=None):
+    def get_user_review(self, user_id, title, category=None, season=_NO_SEASON_FILTER):
         """사용자의 특정 작품 리뷰 조회"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    season_clause, season_params = self._build_season_clause(season)
                     if category:
-                        cursor.execute('''
+                        cursor.execute(f'''
                             SELECT id, movie_title, movie_year, director, score,
                                    one_line_review, additional_comment, category, img_url,
-                                   message_id, channel_id
+                                   message_id, channel_id, season
                             FROM reviews
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
-                        ''', (user_id, title, category))
+                            WHERE user_id = %s AND movie_title = %s AND category = %s{season_clause}
+                        ''', (user_id, title, category) + season_params)
                     else:
-                        cursor.execute('''
+                        cursor.execute(f'''
                             SELECT id, movie_title, movie_year, director, score,
                                    one_line_review, additional_comment, category, img_url,
-                                   message_id, channel_id
+                                   message_id, channel_id, season
                             FROM reviews
-                            WHERE user_id = %s AND movie_title = %s
-                        ''', (user_id, title))
+                            WHERE user_id = %s AND movie_title = %s{season_clause}
+                        ''', (user_id, title) + season_params)
 
                     return cursor.fetchone()
         except Exception as e:
             print(f"❌ Failed to get user review: {e}")
             return None
 
-    def update_review(self, user_id, title, category, score, one_line_review, additional_comment, img_url=None):
+    def update_review(self, user_id, title, category, score, one_line_review, additional_comment, img_url=None, season=_NO_SEASON_FILTER):
         """리뷰 수정"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
+                    season_clause, season_params = self._build_season_clause(season)
                     if img_url:
-                        cursor.execute('''
+                        cursor.execute(f'''
                             UPDATE reviews
                             SET score = %s, one_line_review = %s, additional_comment = %s, img_url = %s
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                            WHERE user_id = %s AND movie_title = %s AND category = %s{season_clause}
                             RETURNING id
-                        ''', (score, one_line_review, additional_comment, img_url, user_id, title, category))
+                        ''', (score, one_line_review, additional_comment, img_url, user_id, title, category) + season_params)
                     else:
-                        cursor.execute('''
+                        cursor.execute(f'''
                             UPDATE reviews
                             SET score = %s, one_line_review = %s, additional_comment = %s
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                            WHERE user_id = %s AND movie_title = %s AND category = %s{season_clause}
                             RETURNING id
-                        ''', (score, one_line_review, additional_comment, user_id, title, category))
+                        ''', (score, one_line_review, additional_comment, user_id, title, category) + season_params)
 
                     updated = cursor.fetchone()
                     conn.commit()
@@ -349,7 +399,8 @@ class Database:
 
     def log_review_action(self, user_id, username, action, movie_title, category,
                           old_score, old_one_line_review, old_additional_comment,
-                          new_score=None, new_one_line_review=None, new_additional_comment=None):
+                          new_score=None, new_one_line_review=None, new_additional_comment=None,
+                          season=None):
         """리뷰 수정/삭제 로그 기록"""
         try:
             with get_conn() as conn:
@@ -358,12 +409,14 @@ class Database:
                         INSERT INTO review_logs
                         (user_id, username, action, movie_title, category,
                          old_score, old_one_line_review, old_additional_comment,
-                         new_score, new_one_line_review, new_additional_comment)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         new_score, new_one_line_review, new_additional_comment,
+                         season)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         user_id, username, action, movie_title, category,
                         old_score, old_one_line_review, old_additional_comment,
-                        new_score, new_one_line_review, new_additional_comment
+                        new_score, new_one_line_review, new_additional_comment,
+                        season
                     ))
                     conn.commit()
                     print(f"✅ Review log saved: {action} - {movie_title}")
@@ -371,6 +424,24 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to save review log: {e}")
             return False
+
+    def get_user_reviews_for_title(self, user_id, title, category):
+        """특정 제목에 대한 사용자의 모든 리뷰 (시즌별 포함) 조회"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        SELECT id, movie_title, movie_year, director, score,
+                               one_line_review, additional_comment, category, img_url,
+                               message_id, channel_id, season
+                        FROM reviews
+                        WHERE user_id = %s AND movie_title = %s AND category = %s
+                        ORDER BY season ASC NULLS FIRST
+                    ''', (user_id, title, category))
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to get user reviews for title: {e}")
+            return []
 
     def get_review_by_message_id(self, message_id):
         """message_id로 리뷰 조회"""
