@@ -428,6 +428,44 @@ class Database:
             print(f"❌ Failed to toggle reaction: {e}")
             return (None, None)
 
+    def ensure_reaction(self, review_id, user_id, username, reaction_type):
+        """반응 확보: 없으면 추가, 다르면 변경, 같으면 유지 (삭제 안함)"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    # 기존 반응 조회
+                    cursor.execute('''
+                        SELECT reaction_type FROM review_reactions
+                        WHERE review_id = %s AND user_id = %s
+                    ''', (review_id, user_id))
+                    existing = cursor.fetchone()
+
+                    if existing:
+                        if existing[0] == reaction_type:
+                            # 같은 반응 → 그대로 유지 (삭제 안함)
+                            return ('kept', reaction_type)
+                        else:
+                            # 다른 반응 → 변경
+                            old_type = existing[0]
+                            cursor.execute('''
+                                UPDATE review_reactions
+                                SET reaction_type = %s, username = %s, created_at = NOW()
+                                WHERE review_id = %s AND user_id = %s
+                            ''', (reaction_type, username, review_id, user_id))
+                            conn.commit()
+                            return ('changed', old_type)
+                    else:
+                        # 새 반응 추가
+                        cursor.execute('''
+                            INSERT INTO review_reactions (review_id, user_id, username, reaction_type)
+                            VALUES (%s, %s, %s, %s)
+                        ''', (review_id, user_id, username, reaction_type))
+                        conn.commit()
+                        return ('added', reaction_type)
+        except Exception as e:
+            print(f"❌ Failed to ensure reaction: {e}")
+            return (None, None)
+
     def get_reaction_counts(self, review_id):
         """리뷰별 반응 카운트"""
         try:
@@ -579,3 +617,42 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to get review ranking: {e}")
             return []
+
+    def save_migrated_review(self, user_id, username, movie_title, movie_year, director,
+                              score, one_line_review, category='movie', created_at=None,
+                              message_id=None, channel_id=None):
+        """마이그레이션된 리뷰 저장 (중복 체크 없이)"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    if created_at:
+                        cursor.execute('''
+                            INSERT INTO reviews
+                            (user_id, username, movie_title, movie_year, director, score,
+                             one_line_review, additional_comment, category,
+                             message_id, channel_id, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                        ''', (
+                            user_id, username, movie_title, movie_year,
+                            director, score, one_line_review, None,
+                            category, message_id, channel_id, created_at
+                        ))
+                    else:
+                        cursor.execute('''
+                            INSERT INTO reviews
+                            (user_id, username, movie_title, movie_year, director, score,
+                             one_line_review, additional_comment, category,
+                             message_id, channel_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                        ''', (
+                            user_id, username, movie_title, movie_year,
+                            director, score, one_line_review, None,
+                            category, message_id, channel_id
+                        ))
+                    conn.commit()
+                    return cursor.fetchone()[0]
+        except Exception as e:
+            print(f"❌ Failed to save migrated review: {e}")
+            return None

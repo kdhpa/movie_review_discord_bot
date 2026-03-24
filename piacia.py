@@ -8,7 +8,7 @@ from review_form import MOVIE_FORM, MANGA_FORM, WEBTOON_FORM
 CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱"}
 CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰"}
 from database import Database
-from api_searcher import ContentSearcher
+from api_searcher import ContentSearcher, GrokSearcher
 from news_scheduler import NewsScheduler
 from assistant_service import AssistantService
 from review_interaction import ReviewReactionView
@@ -832,6 +832,7 @@ class MyBot(commands.Bot):
         self.tree.add_command(write_review_context)
         self.tree.add_command(delete_review_context)
         self.tree.add_command(ranking_command)
+        self.tree.add_command(migration_command)
         await self.tree.sync()
 
         # 뉴스 스케줄러 시작
@@ -1253,6 +1254,121 @@ async def delete_review_context(interaction: discord.Interaction, message: disco
 # ==================== 리뷰 랭킹 ====================
 
 from review_interaction import REACTION_TYPES
+
+@discord.app_commands.command(name="마이그레이션", description="[관리자] 채널의 레거시 리뷰 메시지를 DB로 마이그레이션합니다.")
+@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.describe(채널="마이그레이션할 채널", 메시지수="스캔할 메시지 수 (기본 100)")
+async def migration_command(interaction: discord.Interaction, 채널: discord.TextChannel, 메시지수: int = 100):
+    await interaction.response.defer()
+
+    progress_msg = await interaction.followup.send(
+        f"🔄 {채널.mention} 채널에서 최근 {메시지수}개 메시지를 스캔 중...",
+        wait=True
+    )
+
+    migrated = 0
+    skipped = 0
+    failed = 0
+    processed = 0
+
+    try:
+        async for message in 채널.history(limit=메시지수):
+            processed += 1
+
+            # 봇 메시지는 스킵
+            if message.author.bot:
+                skipped += 1
+                continue
+
+            # 메시지 내용이 없으면 스킵
+            if not message.content or len(message.content) < 10:
+                skipped += 1
+                continue
+
+            # 이미 현재 형식인지 확인 (이모지로 시작하면 스킵)
+            first_line = message.content.split('\n')[0]
+            if any(first_line.startswith(f"{emoji}제목:") for emoji in CATEGORY_EMOJI.values()):
+                skipped += 1
+                continue
+
+            # LLM으로 파싱 시도
+            try:
+                parsed = await GrokSearcher.parse_legacy_review(
+                    message.content,
+                    message.author.display_name
+                )
+
+                if not parsed:
+                    skipped += 1
+                    continue
+
+                # 필수 필드 확인
+                title = parsed.get('title')
+                score = parsed.get('score')
+                one_line = parsed.get('one_line_review')
+                category = parsed.get('category', 'movie')
+
+                if not title or score is None or not one_line:
+                    skipped += 1
+                    continue
+
+                # score를 float로 변환 및 범위 확인
+                try:
+                    score = float(score)
+                    score = max(0, min(5, score))
+                except (ValueError, TypeError):
+                    skipped += 1
+                    continue
+
+                # 카테고리 검증
+                if category not in CATEGORY_EMOJI:
+                    category = 'movie'
+
+                # DB 저장
+                review_id = bot.db.save_migrated_review(
+                    user_id=message.author.id,
+                    username=str(message.author),
+                    movie_title=title,
+                    movie_year=parsed.get('year'),
+                    director=parsed.get('director'),
+                    score=score,
+                    one_line_review=one_line,
+                    category=category,
+                    created_at=message.created_at,
+                    message_id=message.id,
+                    channel_id=message.channel.id
+                )
+
+                if review_id:
+                    migrated += 1
+                    print(f"[MIGRATION] ✅ {title} ({category}) - {message.author.display_name}")
+                else:
+                    failed += 1
+
+            except Exception as e:
+                print(f"[MIGRATION] ❌ 파싱 오류: {e}")
+                failed += 1
+
+            # 10개마다 진행 상황 업데이트
+            if processed % 10 == 0:
+                await progress_msg.edit(
+                    content=f"🔄 스캔 중... ({processed}/{메시지수})\n"
+                            f"✅ 마이그레이션: {migrated} | ⏭️ 스킵: {skipped} | ❌ 실패: {failed}"
+                )
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ 마이그레이션 중 오류 발생: {e}")
+        return
+
+    # 최종 결과
+    await progress_msg.edit(
+        content=f"✅ **마이그레이션 완료**\n\n"
+                f"📊 총 스캔: {processed}개\n"
+                f"✅ 마이그레이션: {migrated}개\n"
+                f"⏭️ 스킵: {skipped}개\n"
+                f"❌ 실패: {failed}개"
+    )
+
 
 @discord.app_commands.command(name="리뷰랭킹", description="반응이 많은 인기 리뷰 TOP 10을 조회합니다.")
 @discord.app_commands.describe(카테고리="카테고리별 필터링 (선택)")

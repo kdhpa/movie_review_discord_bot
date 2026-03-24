@@ -546,6 +546,81 @@ class GrokSearcher:
     """Grok AI API를 통해 영화 소식을 가져오는 클래스"""
 
     @staticmethod
+    def _parse_legacy_review_sync(message_content: str, author_name: str) -> dict:
+        """동기 함수 - 레거시 리뷰 메시지를 LLM으로 파싱"""
+        if not GROK_API_KEY:
+            print("[ERROR] GROK_API_KEY가 설정되지 않았습니다.")
+            return None
+
+        client = Client(
+            api_key=GROK_API_KEY,
+            timeout=60,
+        )
+
+        chat = client.chat.create(model="grok-3-mini-fast")
+
+        chat.append(system("""You are a parser that extracts review information from unstructured text messages.
+Extract the following fields and return ONLY valid JSON (no markdown, no explanation):
+- title: The title of the content being reviewed (movie, drama, anime, manga, webtoon)
+- score: Rating score (convert to 0-5 scale, e.g. "8/10" → 4.0, "A+" → 5.0, "별 4개" → 4.0)
+- one_line_review: The main review comment or opinion
+- category: One of "movie", "drama", "anime", "manga", "webtoon" (guess based on context)
+- year: Release year if mentioned (otherwise null)
+- director: Director or author name if mentioned (otherwise null)
+
+If you cannot extract meaningful review information, return {"error": "not_a_review"}"""))
+
+        chat.append(user(f"""Parse this message and extract review information:
+
+Message author: {author_name}
+Message content:
+{message_content}
+
+Return only JSON."""))
+
+        try:
+            print(f"[DEBUG] _parse_legacy_review_sync() API 호출 시작")
+
+            content = ""
+            for response, chunk in chat.stream():
+                if chunk.content:
+                    content += chunk.content
+
+            print(f"[DEBUG] _parse_legacy_review_sync() 응답: {content[:200]}...")
+
+            if not content:
+                return None
+
+            # JSON 파싱
+            if "```json" in content:
+                json_start = content.find("```json") + 7
+                json_end = content.find("```", json_start)
+                content = content[json_start:json_end].strip()
+            elif "```" in content:
+                json_start = content.find("```") + 3
+                json_end = content.find("```", json_start)
+                content = content[json_start:json_end].strip()
+
+            result = json.loads(content)
+
+            if result.get("error"):
+                return None
+
+            return result
+
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] _parse_legacy_review_sync() JSON 파싱 실패: {e}")
+            return None
+        except Exception as e:
+            print(f"[ERROR] _parse_legacy_review_sync() 예외 발생: {e}")
+            return None
+
+    @staticmethod
+    async def parse_legacy_review(message_content: str, author_name: str) -> dict:
+        """비동기 래퍼 - 레거시 리뷰 메시지 파싱"""
+        return await asyncio.to_thread(GrokSearcher._parse_legacy_review_sync, message_content, author_name)
+
+    @staticmethod
     def _fetch_categorized_news_sync():
         """동기 함수 - xai-sdk 호출 (별도 스레드에서 실행됨)"""
         if not GROK_API_KEY:

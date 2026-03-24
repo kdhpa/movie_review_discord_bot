@@ -92,11 +92,22 @@ class ReactionCommentModal(discord.ui.Modal):
 
         db = interaction.client.db
 
-        # Toggle reaction
-        action, _ = db.toggle_reaction(
-            self.review['id'], interaction.user.id,
-            interaction.user.display_name, self.rtype
-        )
+        # Check comment first to decide reaction behavior
+        comment = self.comment_input.value.strip()
+
+        if comment:
+            # Comment provided: ensure reaction (keep/add, no toggle)
+            action, _ = db.ensure_reaction(
+                self.review['id'], interaction.user.id,
+                interaction.user.display_name, self.rtype
+            )
+        else:
+            # No comment: toggle reaction (existing behavior)
+            action, _ = db.toggle_reaction(
+                self.review['id'], interaction.user.id,
+                interaction.user.display_name, self.rtype
+            )
+
         if action is None:
             await interaction.followup.send(
                 "❌ 반응 처리 중 오류가 발생했습니다.", ephemeral=True
@@ -110,7 +121,6 @@ class ReactionCommentModal(discord.ui.Modal):
         await self.message.edit(view=view)
 
         # Handle comment if provided
-        comment = self.comment_input.value.strip()
         if comment:
             # Check if user already has a comment on this review
             is_edit = db.has_user_comment(self.review['id'], interaction.user.id)
@@ -160,7 +170,9 @@ class ReactionCommentModal(discord.ui.Modal):
                     interaction.user.display_name, comment, sent_msg.id
                 )
 
-                action_msg = "추가" if action == "added" else "취소"
+                # With comment: ensure_reaction returns 'added', 'kept', or 'changed'
+                action_msgs = {'added': '추가', 'kept': '유지', 'changed': '변경'}
+                action_msg = action_msgs.get(action, '처리')
                 comment_msg = "수정" if is_edit else "등록"
                 await interaction.followup.send(
                     f"✅ {self.info['emoji']} 반응이 {action_msg}되었고, 코멘트가 {comment_msg}되었습니다!\n"
@@ -169,7 +181,8 @@ class ReactionCommentModal(discord.ui.Modal):
                 )
 
             except discord.Forbidden:
-                action_msg = "추가" if action == "added" else "취소"
+                action_msgs = {'added': '추가', 'kept': '유지', 'changed': '변경'}
+                action_msg = action_msgs.get(action, '처리')
                 await interaction.followup.send(
                     f"✅ {self.info['emoji']} 반응이 {action_msg}되었습니다.\n"
                     f"⚠️ 쓰레드 권한이 없어 코멘트는 등록되지 않았습니다.",
@@ -177,15 +190,17 @@ class ReactionCommentModal(discord.ui.Modal):
                 )
             except Exception as e:
                 print(f"[ERROR] ReactionCommentModal thread: {e}")
-                action_msg = "추가" if action == "added" else "취소"
+                action_msgs = {'added': '추가', 'kept': '유지', 'changed': '변경'}
+                action_msg = action_msgs.get(action, '처리')
                 await interaction.followup.send(
                     f"✅ {self.info['emoji']} 반응이 {action_msg}되었습니다.\n"
                     f"⚠️ 코멘트 등록 중 오류가 발생했습니다.",
                     ephemeral=True
                 )
         else:
-            # No comment, just reaction toggle
-            action_msg = "추가" if action == "added" else "취소"
+            # No comment: toggle_reaction returns 'added', 'removed', or 'changed'
+            action_msgs = {'added': '추가', 'removed': '취소', 'changed': '변경'}
+            action_msg = action_msgs.get(action, '처리')
             await interaction.followup.send(
                 f"✅ {self.info['emoji']} 반응이 {action_msg}되었습니다!",
                 ephemeral=True
