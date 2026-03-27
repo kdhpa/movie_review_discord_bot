@@ -1,0 +1,25 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd movie_review_discord_bot
+            git pull origin main
+            docker build -t pie-bot .
+            docker stop pie-bot || true
+            docker rm pie-bot || true
+            docker run -d --restart unless-stopped --env-file .env --name pie-bot pie-bot
+            docker image prune -f
