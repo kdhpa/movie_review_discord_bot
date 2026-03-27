@@ -1,0 +1,21 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.venv
+venv
+env
+
+# IDE
+.vscode
+.idea
+
+# 불필요한 파일
+*.md
+*.log
+mini-paas-guide/
