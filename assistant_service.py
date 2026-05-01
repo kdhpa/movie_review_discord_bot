@@ -3,6 +3,7 @@ Assistant Service - Discord channel monitoring + Gemini prompt generation + Clau
 """
 
 import os
+import shlex
 import asyncio
 import discord
 from discord.ui import View, Button
@@ -114,6 +115,22 @@ class AssistantService:
         if channel_id:
             self.monitor_channel_id = int(channel_id)
 
+        # Optional Hermes Kanban bridge.
+        # When enabled, messages from MONITOR_CHANNEL_ID are submitted to the
+        # local Hermes Kanban project pipeline instead of the legacy
+        # Gemini -> Claude flow. This keeps Pie as the Discord intake bot while
+        # Hermes edits/tests the local project on this computer.
+        self.hermes_kanban_enabled = os.getenv("HERMES_KANBAN_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+        self.hermes_project_slug = os.getenv("HERMES_PROJECT_SLUG", "pie")
+        self.hermes_project_path = os.getenv("HERMES_PROJECT_PATH", self.working_dir)
+        self.hermes_report_target = os.getenv("HERMES_REPORT_TARGET", "discord:#오늘-할-일")
+        self.hermes_pipeline_script = os.getenv(
+            "HERMES_PIPELINE_SCRIPT",
+            os.path.expanduser("~/.hermes/scripts/create_project_pipeline.py")
+        )
+        self.hermes_python_bin = os.getenv("HERMES_PYTHON_BIN", "python3")
+        self.hermes_dry_run = os.getenv("HERMES_DRY_RUN", "false").lower() in ("true", "1", "yes", "on")
+
     async def setup_gemini(self):
         """Initialize Gemini and Anthropic APIs"""
         gemini_ready = False
@@ -148,10 +165,14 @@ class AssistantService:
 
     async def process_message(self, message: discord.Message):
         """Process a new message from the monitored channel"""
-        if not self.gemini_model:
+        if not message.content.strip():
             return
 
-        if not message.content.strip():
+        if self.hermes_kanban_enabled:
+            await self.create_hermes_pipeline(message)
+            return
+
+        if not self.gemini_model:
             return
 
         print(f"[AssistantService] Processing message from {message.author}: {message.content[:50]}...")
@@ -191,6 +212,65 @@ class AssistantService:
 
         # Report results
         await self.report_result(message.channel, message.author.id, result, confirm_msg)
+
+    async def create_hermes_pipeline(self, message: discord.Message):
+        """Submit the Discord request to the local Hermes Kanban pipeline."""
+        print(f"[AssistantService] Creating Hermes Kanban pipeline for message {message.id}")
+
+        request = (
+            f"Discord 요청자: {message.author} ({message.author.id})\n"
+            f"채널 ID: {message.channel.id}\n"
+            f"메시지 ID: {message.id}\n\n"
+            f"요청 내용:\n{message.content.strip()}"
+        )
+
+        command = [
+            *shlex.split(self.hermes_python_bin),
+            self.hermes_pipeline_script,
+            "--slug",
+            self.hermes_project_slug,
+            "--project",
+            self.hermes_project_path,
+            "--request",
+            request,
+            "--report-target",
+            self.hermes_report_target,
+        ]
+        if self.hermes_dry_run:
+            command.append("--dry-run")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.working_dir,
+            )
+            stdout, stderr = await process.communicate()
+            stdout_text = stdout.decode("utf-8", errors="replace").strip()
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+
+            if process.returncode != 0:
+                error_text = stderr_text or stdout_text or f"exit code {process.returncode}"
+                await message.reply(
+                    f"❌ Hermes Kanban 작업 등록 실패\n```\n{error_text[:1700]}\n```",
+                    mention_author=True,
+                )
+                return
+
+            await message.reply(
+                "✅ Pie 전용 Hermes 자동화 파이프라인에 작업을 등록했어.\n"
+                f"프로젝트: `{self.hermes_project_path}`\n"
+                "순서: `piepm → piejudge → pieplanner → piecoder → pietester → piereviewer`\n"
+                f"보고 대상: `{self.hermes_report_target}`\n"
+                f"```json\n{stdout_text[:1300]}\n```",
+                mention_author=True,
+            )
+        except Exception as e:
+            await message.reply(
+                f"❌ Hermes Kanban 실행 중 오류가 발생했어: `{str(e)[:1500]}`",
+                mention_author=True,
+            )
 
     async def generate_prompt(self, content: str) -> str:
         """Generate a development prompt using Gemini"""

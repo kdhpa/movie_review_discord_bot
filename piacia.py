@@ -13,6 +13,9 @@ from assistant_service import AssistantService
 from review_interaction import ReviewReactionView
 import io
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 Token = os.getenv("Token")
 
@@ -107,7 +110,8 @@ async def _save_and_send_review(
     comment: str,
     author_id: int,
     author_name: str,
-    display_name: str
+    display_name: str,
+    unit_to: int = None  # 진행도 (영화는 None)
 ):
     """리뷰 저장 및 메시지 전송 (공통 로직)"""
     print(f"[DEBUG] _save_and_send_review() 시작 - 작성자: {author_name}")
@@ -118,9 +122,29 @@ async def _save_and_send_review(
     img_url = movie_info['img_url']
     db_category = movie_info['category']
 
-    # 중복 확인
+    # 1단계: contents 테이블에 작품 저장/조회
+    print(f"[DEBUG] _save_and_send_review() contents 테이블 처리 중...")
+    content_id = db.get_or_create_content(
+        title=title,
+        category=db_category,
+        year_or_platform=year,
+        creator=director,
+        img_url=img_url,
+        tmdb_id=movie_info.get('tmdb_id'),
+        mangadex_id=movie_info.get('mangadex_id'),
+        naver_title_id=movie_info.get('naver_title_id')
+    )
+
+    if not content_id:
+        print(f"[ERROR] _save_and_send_review() content_id 생성 실패")
+        await interaction.followup.send("❌ 작품 정보 저장에 실패했습니다.", ephemeral=True)
+        return
+
+    print(f"[DEBUG] _save_and_send_review() content_id: {content_id}")
+
+    # 2단계: 중복 확인 (v2 메서드 사용)
     print(f"[DEBUG] _save_and_send_review() 중복 확인 중...")
-    if db.has_review(author_id, title, db_category):
+    if db.has_review_v2(author_id, content_id, unit_to):
         print(f"[DEBUG] _save_and_send_review() 중복 발견")
         await interaction.followup.send(
             f"❌ 이미 '{title}'에 대한 리뷰를 작성하셨습니다.\n`/리뷰삭제`로 기존 리뷰를 삭제하세요.",
@@ -128,19 +152,16 @@ async def _save_and_send_review(
         )
         return
 
-    # DB 저장
+    # 3단계: DB 저장 (v2 메서드 사용)
     print(f"[DEBUG] _save_and_send_review() DB 저장 중...")
-    review_id = db.save_review(
+    review_id = db.save_review_v2(
         user_id=author_id,
         username=author_name,
-        movie_title=title,
-        movie_year=year,
-        director=director,
+        content_id=content_id,
         score=score_float,
         one_line_review=line_comment,
         additional_comment=comment,
-        category=db_category,
-        img_url=img_url
+        unit_to=unit_to
     )
     print(f"[DEBUG] _save_and_send_review() DB 저장 완료 - review_id: {review_id}")
 
@@ -450,6 +471,14 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 'category': self.prefetched_category or 'manga'
             }
 
+            # prefetched_info에 외부 ID가 포함되어 있는지 확인 (5개 요소)
+            if len(self.prefetched_info) >= 5:
+                external_id = self.prefetched_info[4]
+                if self.prefetched_category == 'manga':
+                    movie_info['mangadex_id'] = external_id
+                elif self.prefetched_category == 'webtoon':
+                    movie_info['naver_title_id'] = external_id
+
             await _save_and_send_review(
                 interaction,
                 self.db,
@@ -518,10 +547,10 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 return
 
             elif self.category == 'manga':
-                title, year, director, img_url = await ContentSearcher.search_manga(session, title)
+                title, year, director, img_url, mangadex_id = await ContentSearcher.search_manga(session, title)
                 db_category = 'manga'
             else:  # webtoon
-                title, year, director, img_url = await ContentSearcher.search_webtoon(session, title)
+                title, year, director, img_url, naver_title_id = await ContentSearcher.search_webtoon(session, title)
                 db_category = 'webtoon'
 
             print(f"[DEBUG] ReviewForm.on_submit() 검색 결과 - title: {title}, year: {year}, director: {director}, img_url: {img_url}")
@@ -532,7 +561,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 await interaction.followup.send(f"❌ '{original_title}'를 찾을 수 없습니다. 정확한 제목으로 다시 시도해주세요.", ephemeral=True)
                 return
 
-            # 만화/웹툰: 기존 방식
+            # 만화/웹툰: 기존 방식 + 외부 ID 추가
             movie_info = {
                 'title': title,
                 'year': year,
@@ -540,6 +569,12 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 'img_url': img_url,
                 'category': db_category
             }
+
+            # 외부 ID 추가
+            if db_category == 'manga':
+                movie_info['mangadex_id'] = mangadex_id
+            elif db_category == 'webtoon':
+                movie_info['naver_title_id'] = naver_title_id
 
             await _save_and_send_review(
                 interaction,

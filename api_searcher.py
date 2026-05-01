@@ -256,12 +256,14 @@ class ContentSearcher:
 
     @staticmethod
     async def fetch_manga_by_url(session, url):
-        """URL에서 ID 추출 후 만화 정보 조회 (외부 호출용)"""
+        """URL에서 ID 추출 후 만화 정보 조회 (외부 호출용)
+        Returns: (title, year, author, img_url, mangadex_id)
+        """
         manga_id = ContentSearcher._extract_mangadex_id(url)
         if not manga_id:
             return None
         result = await ContentSearcher._fetch_manga_by_id(session, manga_id)
-        # (title, year, author, img_url) 형태로 반환
+        # (title, year, author, img_url, mangadex_id) 형태로 반환
         if result[0] is not None:
             return result
         return None
@@ -275,13 +277,13 @@ class ContentSearcher:
             async with session.get(url) as response:
                 if response.status != 200:
                     print(f"❌ MangaDex API error: status {response.status}")
-                    return None, None, None, None
+                    return None, None, None, None, None
 
                 data = await response.json()
 
             manga = data.get('data')
             if not manga:
-                return None, None, None, None
+                return None, None, None, None, None
 
             attributes = manga.get('attributes', {})
             title_dict = attributes.get('title', {})
@@ -328,12 +330,12 @@ class ContentSearcher:
                         print(f"이미지 정보: {img_url}")
                     break
 
-            print(f"MangaDex ID로 가져온 정보 - 제목: {title}, 년도: {year}, 작가: {author}")
-            return title, year, author, img_url
+            print(f"MangaDex ID로 가져온 정보 - 제목: {title}, 년도: {year}, 작가: {author}, ID: {manga_id}")
+            return title, year, author, img_url, manga_id
 
         except Exception as e:
             print(f"❌ MangaDex API error: {e}")
-            return None, None, None, None
+            return None, None, None, None, None
 
     @staticmethod
     async def _search_manga_direct(session, name):
@@ -346,6 +348,7 @@ class ContentSearcher:
 
             if data.get('data') and len(data['data']) > 0:
                 manga = data['data'][0]
+                manga_id = manga.get('id')
                 attributes = manga.get('attributes', {})
                 title_dict = attributes.get('title', {})
                 alt_titles = attributes.get('altTitles', [])
@@ -387,21 +390,22 @@ class ContentSearcher:
                         cover_attrs = rel.get('attributes', {})
                         filename = cover_attrs.get('fileName')
                         if filename:
-                            manga_id = manga.get('id')
                             img_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
                             print(f"이미지 정보: {img_url}")
                         break
-                print(f"망가덱스에서 가져온 정보 - 제목: {title}, 년도: {year}, 작가: {author}")
-                return title, year, author, img_url
+                print(f"망가덱스에서 가져온 정보 - 제목: {title}, 년도: {year}, 작가: {author}, ID: {manga_id}")
+                return title, year, author, img_url, manga_id
 
         except Exception as e:
             print(f"❌ MangaDex API error: {e}")
 
-        return None, None, None, None
+        return None, None, None, None, None
 
     @staticmethod
     async def search_manga(session, name):
-        """MangaDex에서 만화 검색 (URL 또는 제목으로 검색)"""
+        """MangaDex에서 만화 검색 (URL 또는 제목으로 검색)
+        Returns: (title, year, author, img_url, mangadex_id)
+        """
         print(f"[DEBUG] search_manga() 시작 - name: {name}")
 
         # 0차: MangaDex URL인지 확인
@@ -413,7 +417,7 @@ class ContentSearcher:
                 print(f"[DEBUG] search_manga() URL로 조회 성공 - title={result[0]}")
                 return result
             print(f"[DEBUG] search_manga() URL로 조회 실패")
-            return None, None, None, None
+            return None, None, None, None, None
 
         # 1차: 영어로 번역 후 검색
         print(f"[DEBUG] search_manga() [1차] 영문 번역 시도...")
@@ -424,15 +428,17 @@ class ContentSearcher:
 
         # 한국어 제목이 있으면 반환
         if result[0] is not None and await is_korean(result[0]):
-            print(f"[DEBUG] search_manga() [1차] 한국어 제목 발견 - 반환: title={result[0]}, year={result[1]}, author={result[2]}")
+            print(f"[DEBUG] search_manga() [1차] 한국어 제목 발견 - 반환: title={result[0]}, year={result[1]}, author={result[2]}, id={result[4]}")
             return result
 
         print(f"[DEBUG] search_manga() [1차] 한국어 제목 없음")
-        return None, None, None, None
+        return None, None, None, None, None
 
     @staticmethod
     async def _search_naver_webtoon(session, name):
-        """네이버 웹툰에서 직접 검색 (내부용)"""
+        """네이버 웹툰에서 직접 검색 (내부용)
+        Returns: (title, platform, author, img_url, naver_title_id)
+        """
         print(f"[DEBUG] _search_naver_webtoon() 시작 - name: {name}")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -453,20 +459,23 @@ class ContentSearcher:
                         title = webtoon.get('titleName', name)
                         author = webtoon.get('displayAuthor')
                         img_url = webtoon.get('thumbnailUrl')
-                        print(f"[DEBUG] _search_naver_webtoon() 완료 - title: {title}, author: {author}")
+                        title_id = str(webtoon.get('titleId')) if webtoon.get('titleId') else None
+                        print(f"[DEBUG] _search_naver_webtoon() 완료 - title: {title}, author: {author}, titleId: {title_id}")
 
-                        return title, "네이버웹툰", author, img_url
+                        return title, "네이버웹툰", author, img_url, title_id
                 else:
                     print(f"[DEBUG] _search_naver_webtoon() 상태 오류: {response.status}")
         except Exception as e:
             print(f"[ERROR] _search_naver_webtoon() 실패: {e}")
 
         print(f"[DEBUG] _search_naver_webtoon() 반환값 없음")
-        return None, None, None, None
+        return None, None, None, None, None
 
     @staticmethod
     async def search_webtoon(session, name):
-        """웹툰 검색 (네이버 → 카카오 → Google 스크래핑)"""
+        """웹툰 검색 (네이버 → 카카오 → Google 스크래핑)
+        Returns: (title, platform, author, img_url, naver_title_id)
+        """
         print(f"[DEBUG] search_webtoon() 시작 - name: {name}")
 
         # 1차: 네이버 웹툰 검색
@@ -477,7 +486,7 @@ class ContentSearcher:
             return result
 
         print(f"[DEBUG] search_webtoon() [1차] 실패")
-        return None, None, None, None
+        return None, None, None, None, None
 
 
 class GrokSearcher:

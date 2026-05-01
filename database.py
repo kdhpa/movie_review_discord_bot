@@ -148,6 +148,71 @@ class Database:
                 END $$;
             ''')
 
+            # contents 테이블 생성 (작품 마스터)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS contents (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    year_or_platform TEXT,
+                    creator TEXT,
+                    img_url TEXT,
+                    tmdb_id INTEGER,
+                    mangadex_id TEXT,
+                    naver_title_id TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(title, category)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_contents_category ON contents(category)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_contents_tmdb ON contents(tmdb_id)
+            ''')
+
+            # reviews 테이블에 content_id, unit 컬럼 추가
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN content_id INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN unit_from INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN unit_to INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_reviews_content ON reviews(content_id)
+            ''')
+
+            # review_logs 테이블에도 unit 컬럼 추가
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_logs ADD COLUMN unit_from INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_logs ADD COLUMN unit_to INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+
             self.conn.commit()
             cursor.close()
             print("✅ Tables created/verified successfully")
@@ -157,7 +222,7 @@ class Database:
     def save_review(self, user_id, username, movie_title, movie_year, director,
                    score, one_line_review, additional_comment, category='movie', img_url=None,
                    message_id=None, channel_id=None):
-        """리뷰 저장"""
+        """리뷰 저장 (레거시 메서드, 하위 호환용)"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
@@ -178,6 +243,105 @@ class Database:
         except Exception as e:
             print(f"❌ Failed to save review: {e}")
             return None
+
+    def get_or_create_content(self, title, category, year_or_platform=None,
+                              creator=None, img_url=None,
+                              tmdb_id=None, mangadex_id=None, naver_title_id=None):
+        """작품 조회 또는 생성 (UPSERT)"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    # 1. 기존 작품 조회 (title + category로 UNIQUE)
+                    cursor.execute('''
+                        SELECT id FROM contents
+                        WHERE title = %s AND category = %s
+                    ''', (title, category))
+
+                    existing = cursor.fetchone()
+
+                    if existing:
+                        # 기존 작품이 있으면 ID 반환
+                        return existing[0]
+                    else:
+                        # 없으면 새로 생성
+                        cursor.execute('''
+                            INSERT INTO contents
+                            (title, category, year_or_platform, creator, img_url,
+                             tmdb_id, mangadex_id, naver_title_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                        ''', (title, category, year_or_platform, creator, img_url,
+                              tmdb_id, mangadex_id, naver_title_id))
+
+                        conn.commit()
+                        return cursor.fetchone()[0]
+        except Exception as e:
+            print(f"❌ Failed to get_or_create_content: {e}")
+            return None
+
+    def save_review_v2(self, user_id, username, content_id, score,
+                       one_line_review, additional_comment, unit_to=None,
+                       message_id=None, channel_id=None):
+        """리뷰 저장 (진행도 기반, v2)"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    # unit_to가 있으면 unit_from 자동 계산
+                    unit_from = None
+                    if unit_to is not None:
+                        cursor.execute('''
+                            SELECT MAX(unit_to) FROM reviews
+                            WHERE user_id = %s AND content_id = %s
+                        ''', (user_id, content_id))
+
+                        max_unit = cursor.fetchone()[0]
+                        unit_from = (max_unit + 1) if max_unit else 1
+
+                    # 리뷰 저장
+                    cursor.execute('''
+                        INSERT INTO reviews
+                        (user_id, username, content_id, unit_from, unit_to,
+                         score, one_line_review, additional_comment,
+                         message_id, channel_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    ''', (user_id, username, content_id, unit_from, unit_to,
+                          score, one_line_review, additional_comment,
+                          message_id, channel_id))
+
+                    conn.commit()
+                    return cursor.fetchone()[0]
+        except Exception as e:
+            print(f"❌ Failed to save review (v2): {e}")
+            return None
+
+    def has_review_v2(self, user_id, content_id, unit_to=None):
+        """리뷰 중복/회고 검증 (진행도 기반, v2)"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    if unit_to is None:
+                        # 전체 총평: 이미 전체 총평이 있는지 확인
+                        cursor.execute('''
+                            SELECT id FROM reviews
+                            WHERE user_id = %s AND content_id = %s
+                              AND unit_from IS NULL AND unit_to IS NULL
+                        ''', (user_id, content_id))
+                        return cursor.fetchone() is not None
+                    else:
+                        # 구간 평: 기존 max(unit_to)보다 큰지 확인 (회고 차단)
+                        cursor.execute('''
+                            SELECT MAX(unit_to) FROM reviews
+                            WHERE user_id = %s AND content_id = %s
+                        ''', (user_id, content_id))
+
+                        max_unit = cursor.fetchone()[0]
+                        if max_unit and unit_to <= max_unit:
+                            return True  # 회고 입력 차단
+                        return False
+        except Exception as e:
+            print(f"❌ Failed to check review (v2): {e}")
+            return False
 
     def update_message_id(self, review_id, message_id, channel_id):
         """리뷰의 message_id, channel_id 업데이트"""
@@ -212,22 +376,40 @@ class Database:
             return False
 
     def get_user_reviews(self, user_id, limit=10, category=None):
-        """유저별 리뷰 조회"""
+        """유저별 리뷰 조회 (레거시 + v2 통합)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # content_id가 있는 리뷰는 JOIN, 없는 리뷰는 기존 방식
                     if category:
                         cursor.execute('''
-                            SELECT * FROM reviews
-                            WHERE user_id = %s AND category = %s
-                            ORDER BY created_at DESC
+                            SELECT
+                                r.*,
+                                c.title as content_title,
+                                c.category as content_category,
+                                c.year_or_platform,
+                                c.creator,
+                                c.img_url as content_img_url
+                            FROM reviews r
+                            LEFT JOIN contents c ON r.content_id = c.id
+                            WHERE r.user_id = %s
+                              AND (r.category = %s OR c.category = %s)
+                            ORDER BY r.created_at DESC
                             LIMIT %s
-                        ''', (user_id, category, limit))
+                        ''', (user_id, category, category, limit))
                     else:
                         cursor.execute('''
-                            SELECT * FROM reviews
-                            WHERE user_id = %s
-                            ORDER BY created_at DESC
+                            SELECT
+                                r.*,
+                                c.title as content_title,
+                                c.category as content_category,
+                                c.year_or_platform,
+                                c.creator,
+                                c.img_url as content_img_url
+                            FROM reviews r
+                            LEFT JOIN contents c ON r.content_id = c.id
+                            WHERE r.user_id = %s
+                            ORDER BY r.created_at DESC
                             LIMIT %s
                         ''', (user_id, limit))
 
