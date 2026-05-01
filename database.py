@@ -219,31 +219,6 @@ class Database:
         except Exception as e:
             print(f"❌ Table creation failed: {e}")
 
-    def save_review(self, user_id, username, movie_title, movie_year, director,
-                   score, one_line_review, additional_comment, category='movie', img_url=None,
-                   message_id=None, channel_id=None):
-        """리뷰 저장 (레거시 메서드, 하위 호환용)"""
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute('''
-                        INSERT INTO reviews
-                        (user_id, username, movie_title, movie_year, director, score,
-                         one_line_review, additional_comment, category, img_url,
-                         message_id, channel_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        RETURNING id
-                    ''', (
-                        user_id, username, movie_title, movie_year,
-                        director, score, one_line_review, additional_comment,
-                        category, img_url, message_id, channel_id
-                    ))
-
-                    return cursor.fetchone()[0]
-        except Exception as e:
-            print(f"❌ Failed to save review: {e}")
-            return None
-
     def get_or_create_content(self, title, category, year_or_platform=None,
                               creator=None, img_url=None,
                               tmdb_id=None, mangadex_id=None, naver_title_id=None):
@@ -359,22 +334,6 @@ class Database:
             print(f"❌ Failed to update message_id: {e}")
             return False
 
-    def has_review(self, user_id, movie_title, category='movie'):
-        """유저가 해당 콘텐츠에 리뷰를 작성했는지 확인"""
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute('''
-                        SELECT id FROM reviews
-                        WHERE user_id = %s AND movie_title = %s AND category = %s
-                    ''', (user_id, movie_title, category))
-
-                    result = cursor.fetchone()
-                    return result is not None
-        except Exception as e:
-            print(f"❌ Failed to check review: {e}")
-            return False
-
     def get_user_reviews(self, user_id, limit=10, category=None):
         """유저별 리뷰 조회 (레거시 + v2 통합)"""
         try:
@@ -419,29 +378,32 @@ class Database:
             return []
 
     def get_content_stats(self, title, category=None):
-        """콘텐츠별 평점 통계"""
+        """콘텐츠별 평점 통계 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # content_id 기반 통계 (JOIN)
                     if category:
                         cursor.execute('''
                             SELECT
                                 COUNT(*) as review_count,
-                                AVG(score) as avg_score,
-                                MAX(score) as max_score,
-                                MIN(score) as min_score
-                            FROM reviews
-                            WHERE movie_title = %s AND category = %s
+                                AVG(r.score) as avg_score,
+                                MAX(r.score) as max_score,
+                                MIN(r.score) as min_score
+                            FROM reviews r
+                            JOIN contents c ON r.content_id = c.id
+                            WHERE c.title = %s AND c.category = %s
                         ''', (title, category))
                     else:
                         cursor.execute('''
                             SELECT
                                 COUNT(*) as review_count,
-                                AVG(score) as avg_score,
-                                MAX(score) as max_score,
-                                MIN(score) as min_score
-                            FROM reviews
-                            WHERE movie_title = %s
+                                AVG(r.score) as avg_score,
+                                MAX(r.score) as max_score,
+                                MIN(r.score) as min_score
+                            FROM reviews r
+                            JOIN contents c ON r.content_id = c.id
+                            WHERE c.title = %s
                         ''', (title,))
 
                     stats = cursor.fetchone()
@@ -451,21 +413,29 @@ class Database:
             return None
 
     def delete_review(self, user_id, title, category=None):
-        """유저의 특정 콘텐츠 리뷰 삭제"""
+        """유저의 특정 콘텐츠 리뷰 삭제 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # content_id 기반 삭제
                     if category:
                         cursor.execute('''
-                            DELETE FROM reviews
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
-                            RETURNING id
+                            DELETE FROM reviews r
+                            USING contents c
+                            WHERE r.content_id = c.id
+                              AND r.user_id = %s
+                              AND c.title = %s
+                              AND c.category = %s
+                            RETURNING r.id
                         ''', (user_id, title, category))
                     else:
                         cursor.execute('''
-                            DELETE FROM reviews
-                            WHERE user_id = %s AND movie_title = %s
-                            RETURNING id
+                            DELETE FROM reviews r
+                            USING contents c
+                            WHERE r.content_id = c.id
+                              AND r.user_id = %s
+                              AND c.title = %s
+                            RETURNING r.id
                         ''', (user_id, title))
 
                     deleted = cursor.fetchone()
@@ -476,25 +446,28 @@ class Database:
             return False
 
     def get_user_review(self, user_id, title, category=None):
-        """사용자의 특정 작품 리뷰 조회"""
+        """사용자의 특정 작품 리뷰 조회 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # content_id 기반 조회 (JOIN)
                     if category:
                         cursor.execute('''
-                            SELECT id, movie_title, movie_year, director, score,
-                                   one_line_review, additional_comment, category, img_url,
-                                   message_id, channel_id
-                            FROM reviews
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
+                            SELECT r.*, c.title as content_title, c.category as content_category
+                            FROM reviews r
+                            JOIN contents c ON r.content_id = c.id
+                            WHERE r.user_id = %s AND c.title = %s AND c.category = %s
+                            ORDER BY r.created_at DESC
+                            LIMIT 1
                         ''', (user_id, title, category))
                     else:
                         cursor.execute('''
-                            SELECT id, movie_title, movie_year, director, score,
-                                   one_line_review, additional_comment, category, img_url,
-                                   message_id, channel_id
-                            FROM reviews
-                            WHERE user_id = %s AND movie_title = %s
+                            SELECT r.*, c.title as content_title, c.category as content_category
+                            FROM reviews r
+                            JOIN contents c ON r.content_id = c.id
+                            WHERE r.user_id = %s AND c.title = %s
+                            ORDER BY r.created_at DESC
+                            LIMIT 1
                         ''', (user_id, title))
 
                     return cursor.fetchone()
@@ -503,24 +476,32 @@ class Database:
             return None
 
     def update_review(self, user_id, title, category, score, one_line_review, additional_comment, img_url=None):
-        """리뷰 수정"""
+        """리뷰 수정 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
-                    if img_url:
-                        cursor.execute('''
-                            UPDATE reviews
-                            SET score = %s, one_line_review = %s, additional_comment = %s, img_url = %s
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
-                            RETURNING id
-                        ''', (score, one_line_review, additional_comment, img_url, user_id, title, category))
-                    else:
-                        cursor.execute('''
-                            UPDATE reviews
-                            SET score = %s, one_line_review = %s, additional_comment = %s
-                            WHERE user_id = %s AND movie_title = %s AND category = %s
-                            RETURNING id
-                        ''', (score, one_line_review, additional_comment, user_id, title, category))
+                    # content_id 기반 리뷰 ID 조회
+                    cursor.execute('''
+                        SELECT r.id FROM reviews r
+                        JOIN contents c ON r.content_id = c.id
+                        WHERE r.user_id = %s AND c.title = %s AND c.category = %s
+                        ORDER BY r.created_at DESC
+                        LIMIT 1
+                    ''', (user_id, title, category))
+
+                    result = cursor.fetchone()
+                    if not result:
+                        return False
+
+                    review_id = result[0]
+
+                    # 리뷰 업데이트 (img_url은 무시, contents.img_url 사용)
+                    cursor.execute('''
+                        UPDATE reviews
+                        SET score = %s, one_line_review = %s, additional_comment = %s
+                        WHERE id = %s
+                        RETURNING id
+                    ''', (score, one_line_review, additional_comment, review_id))
 
                     updated = cursor.fetchone()
                     conn.commit()

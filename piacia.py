@@ -303,7 +303,8 @@ class MovieSelectMenu(discord.ui.Select):
             self.form.comment,
             self.form.author_id,
             self.form.author_name,
-            self.form.display_name
+            self.form.display_name,
+            unit_to=self.form.unit_to
         )
 
         print(f"[DEBUG] MovieSelectMenu.callback() 완료")
@@ -410,6 +411,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.score = None
         self.line_comment = None
         self.comment = None
+        self.unit_to = None  # 진행도 (manga/webtoon만)
         # URL로 미리 가져온 만화 정보 (title, year, author, img_url)
         self.prefetched_info = prefetched_info
         self.prefetched_category = prefetched_category
@@ -430,6 +432,19 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
             self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
             self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
             self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
+
+        # 진행도 필드 추가 (manga/webtoon만)
+        if self.category in ['manga', 'webtoon']:
+            # webtoon은 "화", manga는 "권"
+            unit_label = "화" if self.category == 'webtoon' else "권"
+            placeholder_text = f"{unit_label} (예: 52)" if self.category == 'webtoon' else f"{unit_label} (예: 5)"
+
+            self.add_item(discord.ui.TextInput(
+                label=f"진행도 - {unit_label} (선택)",
+                style=discord.TextStyle.short,
+                placeholder=placeholder_text,
+                required=False
+            ))
 
     async def on_submit(self, interaction: discord.Interaction):
         print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}, 작성자: {self.author_name}")
@@ -457,6 +472,27 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         except ValueError:
             await interaction.response.send_message("❌ 별점은 숫자만 입력해주세요!", ephemeral=True)
             return
+
+        # 진행도 추출 (manga/webtoon만)
+        unit_to = None
+        if self.category in ['manga', 'webtoon']:
+            # 진행도 필드는 항상 마지막 필드 (인덱스 4)
+            field_idx = 4
+
+            if len(self.children) > field_idx:
+                unit_to_str = self.children[field_idx].value
+                if unit_to_str:
+                    try:
+                        unit_to = int(unit_to_str)
+                        if unit_to <= 0:
+                            await interaction.response.send_message("❌ 진행도는 1 이상이어야 합니다.", ephemeral=True)
+                            return
+                    except ValueError:
+                        await interaction.response.send_message("❌ 진행도는 정수만 입력해주세요!", ephemeral=True)
+                        return
+
+        # 진행도를 form에 저장 (MovieSelectMenu에서 사용)
+        self.unit_to = unit_to
 
         await interaction.response.defer()
 
@@ -489,7 +525,8 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 self.comment,
                 self.author_id,
                 self.author_name,
-                self.display_name
+                self.display_name,
+                unit_to=unit_to
             )
             return
 
@@ -530,7 +567,8 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                         self.comment,
                         self.author_id,
                         self.author_name,
-                        self.display_name
+                        self.display_name,
+                        unit_to=unit_to
                     )
                     return
 
@@ -586,7 +624,8 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 self.comment,
                 self.author_id,
                 self.author_name,
-                self.display_name
+                self.display_name,
+                unit_to=unit_to
             )
 
 
