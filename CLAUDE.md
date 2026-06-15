@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Discord bot for content reviews (movies, dramas, anime, manga, webtoons) using slash commands. Reviews are stored in PostgreSQL (Supabase). Also includes a daily entertainment news scheduler using Grok AI.
+A Discord bot for content reviews (movies, dramas, anime, manga, webtoons) using slash commands. Reviews are stored in PostgreSQL (Supabase).
 
 ## Running the Bot
 
@@ -21,8 +21,7 @@ python piacia.py
 - `Token` - Discord bot token
 - `DATABASE_URL` - PostgreSQL connection string (Supabase)
 - `TMDB_API` - TMDB API key for movie/drama/anime search
-- `GROK_API_KEY` - Grok AI API key for news feature (optional)
-- `NEWS_CHANNEL_ID` - Discord channel ID for daily news (optional)
+- `GROK_API_KEY` - Grok AI API key for legacy review migration parsing (optional)
 
 ## Code Architecture
 
@@ -31,9 +30,8 @@ python piacia.py
 | File | Purpose |
 |------|---------|
 | `piacia.py` | Main entry: `MyBot` class, slash commands, `ReviewForm` modal, `MovieSelectView` |
-| `api_searcher.py` | `ContentSearcher` (TMDB/MangaDex/Naver), `GrokSearcher` (news via xai-sdk) |
+| `api_searcher.py` | `ContentSearcher` (TMDB/MangaDex/Naver), `GrokSearcher` (legacy review parsing via xai-sdk) |
 | `database.py` | `Database` class with psycopg2, auto-creates `reviews` table on init |
-| `news_scheduler.py` | `NewsScheduler` with discord.ext.tasks loop (13:00 KST daily) |
 | `review_form.py` | `MOVIE_FORM`, `MANGA_FORM`, `WEBTOON_FORM` templates |
 
 ### Slash Commands
@@ -44,7 +42,6 @@ python piacia.py
 | `/내리뷰 [카테고리]` | Show user's recent 5 reviews |
 | `/통계 [제목] [카테고리]` | Show content statistics |
 | `/리뷰삭제 [제목] [카테고리]` | Delete user's review |
-| `/뉴스` | Admin-only: Send daily news immediately |
 
 ### Key Flow: Review Submission
 
@@ -62,14 +59,6 @@ Categories: `movie`, `drama`, `anime`, `manga`, `webtoon`
 
 - TMDB auto-detects category from media_type and genre (animation=anime, tv=drama)
 - Each category has emoji (`CATEGORY_EMOJI`) and Korean name (`CATEGORY_NAME`) mappings
-
-### News Scheduler Architecture
-
-`GrokSearcher.fetch_all_categorized_news()`:
-1. Parallel calls to 3 groups (movie, drama, acg) via `asyncio.gather`
-2. Each group uses xai-sdk with `web_search()` and `x_search()` tools
-3. Merges results into 5 categories + generates headlines
-4. `NewsScheduler` creates main embed + category buttons + discussion thread
 
 ### Database Schema
 

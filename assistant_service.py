@@ -209,7 +209,7 @@ class AssistantService:
 
 프로젝트 컨텍스트:
 - Discord 봇 프로젝트 (discord.py)
-- 주요 파일: piacia.py (메인), api_searcher.py (API), database.py (DB), news_scheduler.py (뉴스)
+- 주요 파일: piacia.py (메인), api_searcher.py (API), database.py (DB)
 - PostgreSQL 데이터베이스 사용 (Supabase)
 - 슬래시 커맨드 기반
 
