@@ -1069,6 +1069,84 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
             )
 
 
+class ReviewLaunchView(discord.ui.View):
+    def __init__(
+        self,
+        db,
+        category: str,
+        author_id: int,
+        author_name: str,
+        display_name: str,
+        source_url: str = None,
+        default_season: int = None,
+        latest_units: int = None,
+    ):
+        super().__init__(timeout=300)
+        self.db = db
+        self.category = category
+        self.author_id = author_id
+        self.author_name = author_name
+        self.display_name = display_name
+        self.source_url = source_url
+        self.default_season = default_season
+        self.latest_units = latest_units
+
+    @discord.ui.button(label="입력창 열기", style=discord.ButtonStyle.primary)
+    async def open_review_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ 이 입력창은 명령을 실행한 사람만 열 수 있습니다.", ephemeral=True)
+            return
+
+        prefetched_info = None
+        if self.category == 'webnovel' and self.source_url:
+            platform = detect_webnovel_platform_from_url(self.source_url) or "웹소설"
+            prefetched_info = (None, platform, "미상", None, self.source_url)
+            print(
+                f"[DEBUG] ReviewLaunchView.open_review_modal() 웹소설 링크 입력 - "
+                f"platform={platform}, url={self.source_url}",
+                flush=True
+            )
+
+        modal = ReviewForm(
+            self.db,
+            self.category,
+            self.author_id,
+            self.author_name,
+            self.display_name,
+            prefetched_info=prefetched_info,
+            default_season=self.default_season,
+            latest_units=self.latest_units,
+            source_url=self.source_url
+        )
+
+        print(
+            f"[DEBUG] ReviewLaunchView.open_review_modal() 모달 전송 직전 - "
+            f"category={self.category}, has_link={bool(self.source_url)}, "
+            f"source_url={self.source_url}, response_done={interaction.response.is_done()}",
+            flush=True
+        )
+
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.HTTPException as e:
+            if getattr(e, "code", None) in (40060, 10062):
+                print(
+                    f"[ERROR] ReviewLaunchView.open_review_modal() Discord interaction 응답 실패 "
+                    f"(code={getattr(e, 'code', None)}, category={self.category}, "
+                    f"source_url={self.source_url}, response_done={interaction.response.is_done()})",
+                    flush=True
+                )
+                try:
+                    await interaction.followup.send(
+                        "❌ 입력창을 여는 중 Discord 응답이 만료되었습니다. 버튼을 다시 눌러주세요.",
+                        ephemeral=True
+                    )
+                except discord.HTTPException:
+                    pass
+                return
+            raise
+
+
 # ==================== Edit Review Modal ====================
 
 class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
@@ -1426,7 +1504,6 @@ async def review_command(
     기수: int = None,
     최신화: int = None
 ):
-    prefetched_info = None
     source_url = normalize_source_url(링크)
     detected_webnovel_platform = detect_webnovel_platform_from_url(source_url) if source_url else None
     if detected_webnovel_platform and 카테고리 != 'webnovel':
@@ -1443,67 +1520,44 @@ async def review_command(
         await interaction.response.send_message("❌ 최신화는 1 이상으로 입력해주세요.", ephemeral=True)
         return
 
-    # 만화 카테고리 + 링크가 있으면 MangaDex에서 정보 미리 조회
-    if 카테고리 == 'manga' and 링크:
-        async with aiohttp.ClientSession() as session:
-            prefetched_info = await ContentSearcher.fetch_manga_by_url(session, source_url or 링크)
+    if 링크 and not source_url:
+        await interaction.response.send_message("❌ 유효하지 않은 링크입니다.", ephemeral=True)
+        return
 
-        if not prefetched_info:
-            await interaction.response.send_message("❌ 유효하지 않은 MangaDex URL입니다.", ephemeral=True)
-            return
-
-        print(f"[DEBUG] review_command() MangaDex URL로 정보 조회 성공: {prefetched_info[0]}")
-    elif 카테고리 == 'webnovel' and 링크:
-        if not source_url:
-            await interaction.response.send_message("❌ 유효하지 않은 웹소설 링크입니다.", ephemeral=True)
-            return
-
-        platform = detected_webnovel_platform or "웹소설"
-        prefetched_info = (None, platform, "미상", None, source_url)
-        print(f"[DEBUG] review_command() 웹소설 링크 입력 - platform: {platform}, url: {source_url}")
-
-    modal = ReviewForm(
+    view = ReviewLaunchView(
         bot.db,
         카테고리,
         interaction.user.id,
         str(interaction.user),
         interaction.user.display_name,
-        prefetched_info,
+        source_url=source_url,
         default_season=기수,
-        latest_units=최신화,
-        source_url=source_url
+        latest_units=최신화
     )
+
+    category_text = CATEGORY_NAME.get(카테고리, 카테고리)
+    emoji = CATEGORY_EMOJI.get(카테고리, "🎬")
     print(
-        f"[DEBUG] review_command() 모달 전송 직전 - "
+        f"[DEBUG] review_command() 모달 버튼 전송 - "
         f"category={카테고리}, has_link={bool(링크)}, "
         f"source_url={source_url}, response_done={interaction.response.is_done()}",
         flush=True
     )
-    if interaction.response.is_done():
-        print(
-            f"[ERROR] review_command() 모달 전송 불가 - 이미 응답된 interaction "
-            f"(category={카테고리}, source_url={source_url})",
-            flush=True
-        )
-        await interaction.followup.send(
-            "❌ 명령 응답이 이미 처리되어 모달을 열 수 없습니다. 봇이 중복 실행 중인지 확인 후 다시 시도해주세요.",
-            ephemeral=True
-        )
-        return
 
     try:
-        await interaction.response.send_modal(modal)
+        await interaction.response.send_message(
+            f"{emoji} {category_text} 한줄평 입력창을 열 준비가 됐습니다.",
+            view=view,
+            ephemeral=True
+        )
     except discord.HTTPException as e:
-        if getattr(e, "code", None) == 40060:
+        if getattr(e, "code", None) in (40060, 10062):
             print(
-                f"[ERROR] review_command() Discord 40060 - interaction 중복 응답 "
+                f"[ERROR] review_command() 모달 버튼 전송 실패 "
+                f"(code={getattr(e, 'code', None)}, "
                 f"(category={카테고리}, has_link={bool(링크)}, source_url={source_url}, "
                 f"response_done={interaction.response.is_done()})",
                 flush=True
-            )
-            await interaction.followup.send(
-                "❌ 명령 응답이 중복 처리되었습니다. 봇이 다른 곳에서도 켜져 있으면 하나만 남기고 다시 시도해주세요.",
-                ephemeral=True
             )
             return
         raise
