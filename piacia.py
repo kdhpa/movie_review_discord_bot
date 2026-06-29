@@ -917,6 +917,17 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         if is_manual_webnovel:
             print(f"[DEBUG] ReviewForm.on_submit() 웹소설 수동 정보로 바로 저장")
             img_url = self.prefetched_info[3] if self.prefetched_info else None
+            if self.source_url:
+                async with aiohttp.ClientSession() as session:
+                    fetched_info = await fetch_webnovel_by_url(session, self.source_url)
+                if fetched_info:
+                    _, fetched_platform, fetched_author, fetched_img_url, _ = fetched_info
+                    if year == "웹소설" and fetched_platform:
+                        year = fetched_platform
+                    if director == "미상" and fetched_author:
+                        director = fetched_author
+                    img_url = img_url or fetched_img_url
+
             movie_info = {
                 'title': title,
                 'year': year,
@@ -1432,11 +1443,9 @@ async def review_command(
             await interaction.response.send_message("❌ 유효하지 않은 웹소설 링크입니다.", ephemeral=True)
             return
 
-        async with aiohttp.ClientSession() as session:
-            prefetched_info = await fetch_webnovel_by_url(session, source_url)
-
-        if prefetched_info:
-            print(f"[DEBUG] review_command() 웹소설 링크 처리 완료: {prefetched_info[0]}, {prefetched_info[1]}")
+        platform = detect_webnovel_platform_from_url(source_url) or "웹소설"
+        prefetched_info = (None, platform, "미상", None, source_url)
+        print(f"[DEBUG] review_command() 웹소설 링크 입력 - platform: {platform}, url: {source_url}")
 
     modal = ReviewForm(
         bot.db,
