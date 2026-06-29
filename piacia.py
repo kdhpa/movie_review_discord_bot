@@ -876,7 +876,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         await interaction.response.defer()
 
         # prefetched_info가 있으면 검색 없이 바로 저장
-        if self.prefetched_info:
+        if self.prefetched_info and not is_manual_webnovel:
             print(f"[DEBUG] ReviewForm.on_submit() prefetched_info로 바로 저장")
             prefetched_db_category = self.prefetched_category or ('movie' if self.category == 'tmdb' else self.category)
             movie_info = {
@@ -1421,6 +1421,14 @@ async def review_command(
 ):
     prefetched_info = None
     source_url = normalize_source_url(링크)
+    detected_webnovel_platform = detect_webnovel_platform_from_url(source_url) if source_url else None
+    if detected_webnovel_platform and 카테고리 != 'webnovel':
+        print(
+            f"[DEBUG] review_command() 웹소설 링크 도메인 감지로 카테고리 보정: "
+            f"{카테고리} -> webnovel ({detected_webnovel_platform})"
+        )
+        카테고리 = 'webnovel'
+
     if 기수 is not None and 기수 <= 0:
         await interaction.response.send_message("❌ 기수는 1 이상으로 입력해주세요.", ephemeral=True)
         return
@@ -1443,7 +1451,7 @@ async def review_command(
             await interaction.response.send_message("❌ 유효하지 않은 웹소설 링크입니다.", ephemeral=True)
             return
 
-        platform = detect_webnovel_platform_from_url(source_url) or "웹소설"
+        platform = detected_webnovel_platform or "웹소설"
         prefetched_info = (None, platform, "미상", None, source_url)
         print(f"[DEBUG] review_command() 웹소설 링크 입력 - platform: {platform}, url: {source_url}")
 
