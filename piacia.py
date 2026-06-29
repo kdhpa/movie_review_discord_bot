@@ -2,7 +2,8 @@ import discord
 import aiohttp
 import asyncio
 import re
-from urllib.parse import urlparse
+import html as html_lib
+from urllib.parse import urlparse, urljoin
 from discord.ext import commands
 from review_form import MOVIE_FORM, MANGA_FORM, WEBTOON_FORM, WEBNOVEL_FORM, format_season
 
@@ -219,7 +220,32 @@ async def send_ephemeral_interaction(
         raise
 
 
+def parse_html_attrs(tag):
+    attrs = {}
+    for match in re.finditer(r'([\w:-]+)\s*=\s*(["\'])(.*?)\2', tag, re.IGNORECASE | re.DOTALL):
+        attrs[match.group(1).lower()] = html_lib.unescape(match.group(3).strip())
+    return attrs
+
+
+def normalize_page_asset_url(asset_url, base_url):
+    asset_url = (asset_url or "").strip()
+    if not asset_url:
+        return None
+
+    asset_url = html_lib.unescape(asset_url).replace("\\/", "/")
+    if asset_url.startswith("//"):
+        return f"https:{asset_url}"
+    return urljoin(base_url, asset_url)
+
+
 def extract_meta_content(html, *keys):
+    wanted_keys = {key.lower() for key in keys}
+    for tag_match in re.finditer(r'<meta\b[^>]*>', html, re.IGNORECASE | re.DOTALL):
+        attrs = parse_html_attrs(tag_match.group(0))
+        meta_key = attrs.get("property") or attrs.get("name") or attrs.get("itemprop")
+        if meta_key and meta_key.lower() in wanted_keys and attrs.get("content"):
+            return re.sub(r'\s+', ' ', attrs["content"]).strip()
+
     for key in keys:
         pattern = (
             r'<meta\b(?=[^>]*(?:property|name)=["\']'
@@ -229,6 +255,46 @@ def extract_meta_content(html, *keys):
         match = re.search(pattern, html, re.IGNORECASE)
         if match:
             return re.sub(r'\s+', ' ', match.group(1)).strip()
+    return None
+
+
+def extract_novelpia_image(html, base_url):
+    patterns = [
+        r'https?:\\?/\\?/images\.novelpia\.com\\?/imagebox\\?/cover\\?/[^"\'<>\s]+',
+        r'//images\.novelpia\.com/imagebox/cover/[^"\'<>\s]+',
+        r'https?://images\.novelpia\.com/imagebox/cover/[^"\'<>\s]+',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return normalize_page_asset_url(match.group(0), base_url)
+    return None
+
+
+def extract_page_image(html, base_url):
+    img_url = extract_meta_content(
+        html,
+        "og:image",
+        "og:image:url",
+        "twitter:image",
+        "twitter:image:src",
+        "image",
+        "thumbnailUrl",
+    )
+    if img_url:
+        return normalize_page_asset_url(img_url, base_url)
+
+    novelpia_img_url = extract_novelpia_image(html, base_url)
+    if novelpia_img_url:
+        return novelpia_img_url
+
+    image_match = re.search(
+        r'<img\b[^>]*(?:src|data-src|data-original)=["\']([^"\']+)["\'][^>]*>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if image_match:
+        return normalize_page_asset_url(image_match.group(1), base_url)
     return None
 
 
@@ -282,8 +348,13 @@ async def fetch_webnovel_by_url(session, url):
             if response.status == 200:
                 html = await response.text()
                 title = clean_webnovel_title(extract_page_title(html), platform)
-                img_url = extract_meta_content(html, "og:image", "twitter:image")
+                img_url = extract_page_image(html, source_url)
                 author = extract_meta_content(html, "author", "article:author") or author
+                print(
+                    f"[DEBUG] fetch_webnovel_by_url() parsed - "
+                    f"title={title}, platform={platform}, author={author}, img_url={img_url}",
+                    flush=True
+                )
             else:
                 print(f"[WARN] fetch_webnovel_by_url() status={response.status}, url={source_url}")
     except Exception as e:
@@ -572,7 +643,7 @@ async def _save_and_send_review(
         timeout = aiohttp.ClientTimeout(total=30)
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': img_url
+            'Referer': source_url or img_url
         }
 
         for attempt in range(3):
@@ -1463,6 +1534,10 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                     _, _, _, img_url, _ = await ContentSearcher.search_manga(session, title)
                 elif search_category == 'webtoon':
                     _, _, _, img_url, _ = await ContentSearcher.search_webtoon(session, title)
+                elif search_category == 'webnovel' and self.review_data.get('source_url'):
+                    fetched_info = await fetch_webnovel_by_url(session, self.review_data['source_url'])
+                    if fetched_info:
+                        _, _, _, img_url, _ = fetched_info
 
             if img_url:
                 self.db.update_review(
@@ -1478,7 +1553,7 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
             timeout = aiohttp.ClientTimeout(total=30)
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': img_url
+                'Referer': self.review_data.get('source_url') or img_url
             }
             for attempt in range(3):
                 try:
@@ -1636,7 +1711,7 @@ async def review_command(
 
     sent = await send_ephemeral_interaction(
         interaction,
-        f"{emoji} {category_text} 한줄평 입력창을 열 준비가 됐습니다.",
+        f"{emoji} {category_text} 한줄평 입력창을 열 준비가 됐습니다. 아래 버튼을 누르면 입력창이 열립니다.",
         view=view
     )
     if not sent:
