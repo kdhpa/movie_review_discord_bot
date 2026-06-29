@@ -164,6 +164,61 @@ def detect_webnovel_platform_from_url(url):
     return None
 
 
+async def defer_ephemeral_interaction(interaction: discord.Interaction, context: str) -> bool:
+    if interaction.response.is_done():
+        return True
+
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        return True
+    except discord.HTTPException as e:
+        code = getattr(e, "code", None)
+        if code == 40060:
+            print(
+                f"[WARN] {context} initial defer skipped - interaction already acknowledged",
+                flush=True
+            )
+            return True
+        if code == 10062:
+            print(
+                f"[ERROR] {context} initial defer failed - unknown interaction",
+                flush=True
+            )
+            return False
+        raise
+
+
+async def send_ephemeral_interaction(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    view: discord.ui.View = None
+) -> bool:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message(content, view=view, ephemeral=True)
+        return True
+    except discord.HTTPException as e:
+        code = getattr(e, "code", None)
+        if code == 40060:
+            try:
+                await interaction.followup.send(content, view=view, ephemeral=True)
+                return True
+            except discord.HTTPException as followup_error:
+                print(
+                    f"[ERROR] send_ephemeral_interaction() followup after 40060 failed "
+                    f"(code={getattr(followup_error, 'code', None)})",
+                    flush=True
+                )
+                return False
+        if code == 10062:
+            print("[ERROR] send_ephemeral_interaction() failed - unknown interaction", flush=True)
+            return False
+        raise
+
+
 def extract_meta_content(html, *keys):
     for key in keys:
         pattern = (
@@ -746,7 +801,11 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 if len(prefetched_info) >= 5:
                     self.source_url = self.source_url or normalize_source_url(prefetched_info[4])
 
-            title_input = discord.ui.TextInput(label="작품 이름", placeholder="예: 전지적 독자 시점")
+            title_input = discord.ui.TextInput(
+                label="작품 이름",
+                placeholder="링크에서 못 가져오면 직접 입력",
+                required=not bool(self.source_url)
+            )
             if title_default:
                 title_input.default = title_default
             self.add_item(title_input)
@@ -781,7 +840,13 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
             self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
         else:
             # 기존 필드 모두 포함
-            self.add_item(discord.ui.TextInput(label="작품 이름", placeholder="제목을 입력하세요"))
+            title_required = not (self.category == 'manga' and self.source_url)
+            title_placeholder = "링크에서 못 가져오면 직접 입력" if not title_required else "제목을 입력하세요"
+            self.add_item(discord.ui.TextInput(
+                label="작품 이름",
+                placeholder=title_placeholder,
+                required=title_required
+            ))
             self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
             self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
             self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
@@ -924,16 +989,25 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         if is_manual_webnovel:
             print(f"[DEBUG] ReviewForm.on_submit() 웹소설 수동 정보로 바로 저장")
             img_url = self.prefetched_info[3] if self.prefetched_info else None
+            fetched_title = None
             if self.source_url:
                 async with aiohttp.ClientSession() as session:
                     fetched_info = await fetch_webnovel_by_url(session, self.source_url)
                 if fetched_info:
-                    _, fetched_platform, fetched_author, fetched_img_url, _ = fetched_info
+                    fetched_title, fetched_platform, fetched_author, fetched_img_url, _ = fetched_info
                     if year == "웹소설" and fetched_platform:
                         year = fetched_platform
                     if director == "미상" and fetched_author:
                         director = fetched_author
                     img_url = img_url or fetched_img_url
+            if not title and fetched_title:
+                title = fetched_title
+            if not title:
+                await interaction.followup.send(
+                    "❌ 링크에서 작품 이름을 가져오지 못했습니다. 작품 이름을 직접 입력해주세요.",
+                    ephemeral=True
+                )
+                return
 
             movie_info = {
                 'title': title,
@@ -1021,7 +1095,20 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 return
 
             elif self.category == 'manga':
-                title, year, director, img_url, mangadex_id = await ContentSearcher.search_manga(session, title)
+                if self.source_url:
+                    manga_info = await ContentSearcher.fetch_manga_by_url(session, self.source_url)
+                    if not manga_info:
+                        await interaction.followup.send("❌ 유효하지 않은 MangaDex URL입니다.", ephemeral=True)
+                        return
+
+                    fetched_title, year, director, img_url, mangadex_id = manga_info
+                    title = title or fetched_title
+                    print(
+                        f"[DEBUG] ReviewForm.on_submit() MangaDex 링크 조회 성공 - "
+                        f"title: {title}, id: {mangadex_id}"
+                    )
+                else:
+                    title, year, director, img_url, mangadex_id = await ContentSearcher.search_manga(session, title)
                 db_category = 'manga'
             else:  # webtoon
                 title, year, director, img_url, naver_title_id = await ContentSearcher.search_webtoon(session, title)
@@ -1504,6 +1591,9 @@ async def review_command(
     기수: int = None,
     최신화: int = None
 ):
+    if not await defer_ephemeral_interaction(interaction, "review_command()"):
+        return
+
     source_url = normalize_source_url(링크)
     detected_webnovel_platform = detect_webnovel_platform_from_url(source_url) if source_url else None
     if detected_webnovel_platform and 카테고리 != 'webnovel':
@@ -1514,14 +1604,14 @@ async def review_command(
         카테고리 = 'webnovel'
 
     if 기수 is not None and 기수 <= 0:
-        await interaction.response.send_message("❌ 기수는 1 이상으로 입력해주세요.", ephemeral=True)
+        await send_ephemeral_interaction(interaction, "❌ 기수는 1 이상으로 입력해주세요.")
         return
     if 최신화 is not None and 최신화 <= 0:
-        await interaction.response.send_message("❌ 최신화는 1 이상으로 입력해주세요.", ephemeral=True)
+        await send_ephemeral_interaction(interaction, "❌ 최신화는 1 이상으로 입력해주세요.")
         return
 
     if 링크 and not source_url:
-        await interaction.response.send_message("❌ 유효하지 않은 링크입니다.", ephemeral=True)
+        await send_ephemeral_interaction(interaction, "❌ 유효하지 않은 링크입니다.")
         return
 
     view = ReviewLaunchView(
@@ -1538,29 +1628,24 @@ async def review_command(
     category_text = CATEGORY_NAME.get(카테고리, 카테고리)
     emoji = CATEGORY_EMOJI.get(카테고리, "🎬")
     print(
-        f"[DEBUG] review_command() 모달 버튼 전송 - "
+        f"[DEBUG] review_command() 모달 버튼 followup 전송 - "
         f"category={카테고리}, has_link={bool(링크)}, "
         f"source_url={source_url}, response_done={interaction.response.is_done()}",
         flush=True
     )
 
-    try:
-        await interaction.response.send_message(
-            f"{emoji} {category_text} 한줄평 입력창을 열 준비가 됐습니다.",
-            view=view,
-            ephemeral=True
+    sent = await send_ephemeral_interaction(
+        interaction,
+        f"{emoji} {category_text} 한줄평 입력창을 열 준비가 됐습니다.",
+        view=view
+    )
+    if not sent:
+        print(
+            f"[ERROR] review_command() 모달 버튼 followup 전송 실패 "
+            f"(category={카테고리}, has_link={bool(링크)}, source_url={source_url}, "
+            f"response_done={interaction.response.is_done()})",
+            flush=True
         )
-    except discord.HTTPException as e:
-        if getattr(e, "code", None) in (40060, 10062):
-            print(
-                f"[ERROR] review_command() 모달 버튼 전송 실패 "
-                f"(code={getattr(e, 'code', None)}, "
-                f"(category={카테고리}, has_link={bool(링크)}, source_url={source_url}, "
-                f"response_done={interaction.response.is_done()})",
-                flush=True
-            )
-            return
-        raise
 
 
 @discord.app_commands.command(name="내리뷰", description="내가 작성한 리뷰 목록을 조회합니다.")
