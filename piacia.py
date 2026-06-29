@@ -735,9 +735,16 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         if self.category == 'webnovel':
             title_default = prefetched_info[0] if prefetched_info and prefetched_info[0] else None
             platform_default = None
+            meta_placeholder = "예: 싱숑 / 노벨피아"
             if prefetched_info:
-                platform_default = f"{prefetched_info[2]} / {prefetched_info[1]}"
-                self.source_url = self.source_url or normalize_source_url(prefetched_info[4])
+                prefetched_platform = prefetched_info[1] if len(prefetched_info) > 1 else None
+                prefetched_author = prefetched_info[2] if len(prefetched_info) > 2 else None
+                if prefetched_author and prefetched_author != "미상":
+                    platform_default = f"{prefetched_author} / {prefetched_platform}"
+                elif prefetched_platform:
+                    meta_placeholder = f"예: 작가명 / {prefetched_platform}"
+                if len(prefetched_info) >= 5:
+                    self.source_url = self.source_url or normalize_source_url(prefetched_info[4])
 
             title_input = discord.ui.TextInput(label="작품 이름", placeholder="예: 전지적 독자 시점")
             if title_default:
@@ -746,7 +753,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
 
             meta_input = discord.ui.TextInput(
                 label="작가 / 플랫폼 (선택)",
-                placeholder="예: 싱숑 / 노벨피아",
+                placeholder=meta_placeholder,
                 required=False
             )
             if platform_default:
@@ -1466,7 +1473,40 @@ async def review_command(
         latest_units=최신화,
         source_url=source_url
     )
-    await interaction.response.send_modal(modal)
+    print(
+        f"[DEBUG] review_command() 모달 전송 직전 - "
+        f"category={카테고리}, has_link={bool(링크)}, "
+        f"source_url={source_url}, response_done={interaction.response.is_done()}",
+        flush=True
+    )
+    if interaction.response.is_done():
+        print(
+            f"[ERROR] review_command() 모달 전송 불가 - 이미 응답된 interaction "
+            f"(category={카테고리}, source_url={source_url})",
+            flush=True
+        )
+        await interaction.followup.send(
+            "❌ 명령 응답이 이미 처리되어 모달을 열 수 없습니다. 봇이 중복 실행 중인지 확인 후 다시 시도해주세요.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        await interaction.response.send_modal(modal)
+    except discord.HTTPException as e:
+        if getattr(e, "code", None) == 40060:
+            print(
+                f"[ERROR] review_command() Discord 40060 - interaction 중복 응답 "
+                f"(category={카테고리}, has_link={bool(링크)}, source_url={source_url}, "
+                f"response_done={interaction.response.is_done()})",
+                flush=True
+            )
+            await interaction.followup.send(
+                "❌ 명령 응답이 중복 처리되었습니다. 봇이 다른 곳에서도 켜져 있으면 하나만 남기고 다시 시도해주세요.",
+                ephemeral=True
+            )
+            return
+        raise
 
 
 @discord.app_commands.command(name="내리뷰", description="내가 작성한 리뷰 목록을 조회합니다.")
