@@ -5,6 +5,8 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+_NO_SEASON_FILTER = object()
+
 def get_conn():
     return psycopg2.connect(
         DATABASE_URL,
@@ -148,6 +150,22 @@ class Database:
                 END $$;
             ''')
 
+            # 기존 테이블에 season 컬럼 추가 (이미 존재하면 무시)
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN season INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_logs ADD COLUMN season INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+
             # contents 테이블 생성 (작품 마스터)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS contents (
@@ -194,6 +212,20 @@ class Database:
                 END $$;
             ''')
             cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN latest_units INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ADD COLUMN source_url TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_reviews_content ON reviews(content_id)
             ''')
 
@@ -212,12 +244,35 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$;
             ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_logs ADD COLUMN latest_units INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE review_logs ADD COLUMN source_url TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
 
             self.conn.commit()
             cursor.close()
             print("✅ Tables created/verified successfully")
         except Exception as e:
             print(f"❌ Table creation failed: {e}")
+
+    @staticmethod
+    def _build_season_clause(season, column='r.season'):
+        """season 값에 따른 SQL 조건과 파라미터 반환."""
+        if season is _NO_SEASON_FILTER:
+            return "", ()
+        if season is None:
+            return f" AND {column} IS NULL", ()
+        return f" AND {column} = %s", (season,)
 
     def get_or_create_content(self, title, category, year_or_platform=None,
                               creator=None, img_url=None,
@@ -256,18 +311,32 @@ class Database:
 
     def save_review_v2(self, user_id, username, content_id, score,
                        one_line_review, additional_comment, unit_to=None,
-                       message_id=None, channel_id=None):
+                       message_id=None, channel_id=None, season=None,
+                       latest_units=None, source_url=None):
         """리뷰 저장 (진행도 기반, v2)"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
+                    cursor.execute('''
+                        SELECT title, category, year_or_platform, creator, img_url
+                        FROM contents
+                        WHERE id = %s
+                    ''', (content_id,))
+                    content = cursor.fetchone()
+                    if not content:
+                        return None
+
+                    content_title, content_category, year_or_platform, creator, img_url = content
+
                     # unit_to가 있으면 unit_from 자동 계산
                     unit_from = None
                     if unit_to is not None:
-                        cursor.execute('''
+                        season_clause, season_params = self._build_season_clause(season, 'season')
+                        cursor.execute(f'''
                             SELECT MAX(unit_to) FROM reviews
                             WHERE user_id = %s AND content_id = %s
-                        ''', (user_id, content_id))
+                            {season_clause}
+                        ''', (user_id, content_id) + season_params)
 
                         max_unit = cursor.fetchone()[0]
                         unit_from = (max_unit + 1) if max_unit else 1
@@ -275,14 +344,16 @@ class Database:
                     # 리뷰 저장
                     cursor.execute('''
                         INSERT INTO reviews
-                        (user_id, username, content_id, unit_from, unit_to,
+                        (user_id, username, movie_title, movie_year, director,
+                         category, img_url, content_id, unit_from, unit_to,
                          score, one_line_review, additional_comment,
-                         message_id, channel_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         message_id, channel_id, season, latest_units, source_url)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
-                    ''', (user_id, username, content_id, unit_from, unit_to,
-                          score, one_line_review, additional_comment,
-                          message_id, channel_id))
+                    ''', (user_id, username, content_title, year_or_platform, creator,
+                          content_category, img_url, content_id, unit_from, unit_to,
+                          score, one_line_review, additional_comment, message_id,
+                          channel_id, season, latest_units, source_url))
 
                     conn.commit()
                     return cursor.fetchone()[0]
@@ -290,25 +361,28 @@ class Database:
             print(f"❌ Failed to save review (v2): {e}")
             return None
 
-    def has_review_v2(self, user_id, content_id, unit_to=None):
+    def has_review_v2(self, user_id, content_id, unit_to=None, season=None):
         """리뷰 중복/회고 검증 (진행도 기반, v2)"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
+                    season_clause, season_params = self._build_season_clause(season, 'season')
                     if unit_to is None:
                         # 전체 총평: 이미 전체 총평이 있는지 확인
-                        cursor.execute('''
+                        cursor.execute(f'''
                             SELECT id FROM reviews
                             WHERE user_id = %s AND content_id = %s
                               AND unit_from IS NULL AND unit_to IS NULL
-                        ''', (user_id, content_id))
+                              {season_clause}
+                        ''', (user_id, content_id) + season_params)
                         return cursor.fetchone() is not None
                     else:
                         # 구간 평: 기존 max(unit_to)보다 큰지 확인 (회고 차단)
-                        cursor.execute('''
+                        cursor.execute(f'''
                             SELECT MAX(unit_to) FROM reviews
                             WHERE user_id = %s AND content_id = %s
-                        ''', (user_id, content_id))
+                            {season_clause}
+                        ''', (user_id, content_id) + season_params)
 
                         max_unit = cursor.fetchone()[0]
                         if max_unit and unit_to <= max_unit:
@@ -335,15 +409,40 @@ class Database:
             return False
 
     def get_user_reviews(self, user_id, limit=10, category=None):
-        """유저별 리뷰 조회 (레거시 + v2 통합)"""
+        """유저별 최신 리뷰 조회. 진행 히스토리는 작품/기수별 최신 행만 반환."""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    # content_id가 있는 리뷰는 JOIN, 없는 리뷰는 기존 방식
+                    category_clause = ""
+                    params = [user_id]
                     if category:
-                        cursor.execute('''
+                        category_clause = "AND (r.category = %s OR c.category = %s)"
+                        params.extend([category, category])
+                    params.append(limit)
+
+                    cursor.execute(f'''
+                        WITH joined_reviews AS (
                             SELECT
-                                r.*,
+                                r.id,
+                                r.user_id,
+                                r.username,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                r.score,
+                                r.one_line_review,
+                                r.additional_comment,
+                                r.created_at,
+                                COALESCE(c.img_url, r.img_url) as img_url,
+                                r.message_id,
+                                r.channel_id,
+                                r.content_id,
+                                r.unit_from,
+                                r.unit_to,
+                                r.latest_units,
+                                r.source_url,
+                                r.season,
                                 c.title as content_title,
                                 c.category as content_category,
                                 c.year_or_platform,
@@ -352,25 +451,24 @@ class Database:
                             FROM reviews r
                             LEFT JOIN contents c ON r.content_id = c.id
                             WHERE r.user_id = %s
-                              AND (r.category = %s OR c.category = %s)
-                            ORDER BY r.created_at DESC
-                            LIMIT %s
-                        ''', (user_id, category, category, limit))
-                    else:
-                        cursor.execute('''
+                              {category_clause}
+                        ),
+                        latest_reviews AS (
                             SELECT
-                                r.*,
-                                c.title as content_title,
-                                c.category as content_category,
-                                c.year_or_platform,
-                                c.creator,
-                                c.img_url as content_img_url
-                            FROM reviews r
-                            LEFT JOIN contents c ON r.content_id = c.id
-                            WHERE r.user_id = %s
-                            ORDER BY r.created_at DESC
-                            LIMIT %s
-                        ''', (user_id, limit))
+                                joined_reviews.*,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY
+                                        COALESCE(content_id::text, movie_title || '|' || COALESCE(category, '')),
+                                        COALESCE(season, 0)
+                                    ORDER BY created_at DESC, id DESC
+                                ) as rn
+                            FROM joined_reviews
+                        )
+                        SELECT * FROM latest_reviews
+                        WHERE rn = 1
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT %s
+                    ''', tuple(params))
 
                     return cursor.fetchall()
         except Exception as e:
@@ -378,33 +476,38 @@ class Database:
             return []
 
     def get_content_stats(self, title, category=None):
-        """콘텐츠별 평점 통계 (v2 호환)"""
+        """콘텐츠별 평점 통계. 사용자별 최신 히스토리 행을 대표 점수로 사용."""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    # content_id 기반 통계 (JOIN)
+                    category_clause = ""
+                    params = [title]
                     if category:
-                        cursor.execute('''
+                        category_clause = "AND c.category = %s"
+                        params.append(category)
+
+                    cursor.execute(f'''
+                        WITH latest_scores AS (
                             SELECT
-                                COUNT(*) as review_count,
-                                AVG(r.score) as avg_score,
-                                MAX(r.score) as max_score,
-                                MIN(r.score) as min_score
-                            FROM reviews r
-                            JOIN contents c ON r.content_id = c.id
-                            WHERE c.title = %s AND c.category = %s
-                        ''', (title, category))
-                    else:
-                        cursor.execute('''
-                            SELECT
-                                COUNT(*) as review_count,
-                                AVG(r.score) as avg_score,
-                                MAX(r.score) as max_score,
-                                MIN(r.score) as min_score
+                                r.user_id,
+                                r.score,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY r.user_id
+                                    ORDER BY r.created_at DESC, r.id DESC
+                                ) as rn
                             FROM reviews r
                             JOIN contents c ON r.content_id = c.id
                             WHERE c.title = %s
-                        ''', (title,))
+                              {category_clause}
+                        )
+                        SELECT
+                            COUNT(*) as review_count,
+                            AVG(score) as avg_score,
+                            MAX(score) as max_score,
+                            MIN(score) as min_score
+                        FROM latest_scores
+                        WHERE rn = 1
+                    ''', tuple(params))
 
                     stats = cursor.fetchone()
                     return stats
@@ -412,31 +515,48 @@ class Database:
             print(f"❌ Failed to get content stats: {e}")
             return None
 
-    def delete_review(self, user_id, title, category=None):
+    def delete_review(self, user_id, title, category=None, season=_NO_SEASON_FILTER):
         """유저의 특정 콘텐츠 리뷰 삭제 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     # content_id 기반 삭제
+                    season_clause, season_params = self._build_season_clause(season)
                     if category:
-                        cursor.execute('''
+                        cursor.execute(f'''
+                            WITH target AS (
+                                SELECT r.id
+                                FROM reviews r
+                                JOIN contents c ON r.content_id = c.id
+                                WHERE r.user_id = %s
+                                  AND c.title = %s
+                                  AND c.category = %s
+                                  {season_clause}
+                                ORDER BY r.created_at DESC, r.id DESC
+                                LIMIT 1
+                            )
                             DELETE FROM reviews r
-                            USING contents c
-                            WHERE r.content_id = c.id
-                              AND r.user_id = %s
-                              AND c.title = %s
-                              AND c.category = %s
+                            USING target
+                            WHERE r.id = target.id
                             RETURNING r.id
-                        ''', (user_id, title, category))
+                        ''', (user_id, title, category) + season_params)
                     else:
-                        cursor.execute('''
+                        cursor.execute(f'''
+                            WITH target AS (
+                                SELECT r.id
+                                FROM reviews r
+                                JOIN contents c ON r.content_id = c.id
+                                WHERE r.user_id = %s
+                                  AND c.title = %s
+                                  {season_clause}
+                                ORDER BY r.created_at DESC, r.id DESC
+                                LIMIT 1
+                            )
                             DELETE FROM reviews r
-                            USING contents c
-                            WHERE r.content_id = c.id
-                              AND r.user_id = %s
-                              AND c.title = %s
+                            USING target
+                            WHERE r.id = target.id
                             RETURNING r.id
-                        ''', (user_id, title))
+                        ''', (user_id, title) + season_params)
 
                     deleted = cursor.fetchone()
                     conn.commit()
@@ -445,49 +565,71 @@ class Database:
             print(f"❌ Failed to delete review: {e}")
             return False
 
-    def get_user_review(self, user_id, title, category=None):
+    def get_user_review(self, user_id, title, category=None, season=_NO_SEASON_FILTER):
         """사용자의 특정 작품 리뷰 조회 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     # content_id 기반 조회 (JOIN)
+                    season_clause, season_params = self._build_season_clause(season)
                     if category:
-                        cursor.execute('''
-                            SELECT r.*, c.title as content_title, c.category as content_category
+                        cursor.execute(f'''
+                            SELECT
+                                r.*,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                COALESCE(c.img_url, r.img_url) as img_url,
+                                c.title as content_title,
+                                c.category as content_category
                             FROM reviews r
                             JOIN contents c ON r.content_id = c.id
                             WHERE r.user_id = %s AND c.title = %s AND c.category = %s
+                              {season_clause}
                             ORDER BY r.created_at DESC
                             LIMIT 1
-                        ''', (user_id, title, category))
+                        ''', (user_id, title, category) + season_params)
                     else:
-                        cursor.execute('''
-                            SELECT r.*, c.title as content_title, c.category as content_category
+                        cursor.execute(f'''
+                            SELECT
+                                r.*,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                COALESCE(c.img_url, r.img_url) as img_url,
+                                c.title as content_title,
+                                c.category as content_category
                             FROM reviews r
                             JOIN contents c ON r.content_id = c.id
                             WHERE r.user_id = %s AND c.title = %s
+                              {season_clause}
                             ORDER BY r.created_at DESC
                             LIMIT 1
-                        ''', (user_id, title))
+                        ''', (user_id, title) + season_params)
 
                     return cursor.fetchone()
         except Exception as e:
             print(f"❌ Failed to get user review: {e}")
             return None
 
-    def update_review(self, user_id, title, category, score, one_line_review, additional_comment, img_url=None):
+    def update_review(self, user_id, title, category, score, one_line_review, additional_comment,
+                      img_url=None, season=_NO_SEASON_FILTER):
         """리뷰 수정 (v2 호환)"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
                     # content_id 기반 리뷰 ID 조회
-                    cursor.execute('''
+                    season_clause, season_params = self._build_season_clause(season)
+                    cursor.execute(f'''
                         SELECT r.id FROM reviews r
                         JOIN contents c ON r.content_id = c.id
                         WHERE r.user_id = %s AND c.title = %s AND c.category = %s
+                          {season_clause}
                         ORDER BY r.created_at DESC
                         LIMIT 1
-                    ''', (user_id, title, category))
+                    ''', (user_id, title, category) + season_params)
 
                     result = cursor.fetchone()
                     if not result:
@@ -512,7 +654,9 @@ class Database:
 
     def log_review_action(self, user_id, username, action, movie_title, category,
                           old_score, old_one_line_review, old_additional_comment,
-                          new_score=None, new_one_line_review=None, new_additional_comment=None):
+                          new_score=None, new_one_line_review=None, new_additional_comment=None,
+                          season=None, unit_from=None, unit_to=None, latest_units=None,
+                          source_url=None):
         """리뷰 수정/삭제 로그 기록"""
         try:
             with get_conn() as conn:
@@ -521,12 +665,14 @@ class Database:
                         INSERT INTO review_logs
                         (user_id, username, action, movie_title, category,
                          old_score, old_one_line_review, old_additional_comment,
-                         new_score, new_one_line_review, new_additional_comment)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         new_score, new_one_line_review, new_additional_comment,
+                         season, unit_from, unit_to, latest_units, source_url)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         user_id, username, action, movie_title, category,
                         old_score, old_one_line_review, old_additional_comment,
-                        new_score, new_one_line_review, new_additional_comment
+                        new_score, new_one_line_review, new_additional_comment,
+                        season, unit_from, unit_to, latest_units, source_url
                     ))
                     conn.commit()
                     print(f"✅ Review log saved: {action} - {movie_title}")
@@ -535,13 +681,123 @@ class Database:
             print(f"❌ Failed to save review log: {e}")
             return False
 
+    def get_review_history(self, user_id, title, category=None, season=_NO_SEASON_FILTER, limit=10):
+        """특정 작품의 진행 리뷰 히스토리 조회."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    season_clause, season_params = self._build_season_clause(season)
+                    if category:
+                        cursor.execute(f'''
+                            SELECT
+                                r.*,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                COALESCE(c.img_url, r.img_url) as img_url
+                            FROM reviews r
+                            LEFT JOIN contents c ON r.content_id = c.id
+                            WHERE r.user_id = %s
+                              AND COALESCE(c.title, r.movie_title) = %s
+                              AND COALESCE(c.category, r.category) = %s
+                              {season_clause}
+                            ORDER BY r.created_at DESC, r.id DESC
+                            LIMIT %s
+                        ''', (user_id, title, category) + season_params + (limit,))
+                    else:
+                        cursor.execute(f'''
+                            SELECT
+                                r.*,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                COALESCE(c.img_url, r.img_url) as img_url
+                            FROM reviews r
+                            LEFT JOIN contents c ON r.content_id = c.id
+                            WHERE r.user_id = %s
+                              AND COALESCE(c.title, r.movie_title) = %s
+                              {season_clause}
+                            ORDER BY r.created_at DESC, r.id DESC
+                            LIMIT %s
+                        ''', (user_id, title) + season_params + (limit,))
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to get review history: {e}")
+            return []
+
+    def get_review_logs(self, user_id, title=None, category=None, season=_NO_SEASON_FILTER, limit=10):
+        """리뷰 수정/삭제 로그 조회."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    season_clause, season_params = self._build_season_clause(season, 'season')
+                    filters = ["user_id = %s"]
+                    params = [user_id]
+
+                    if title:
+                        filters.append("movie_title = %s")
+                        params.append(title)
+                    if category:
+                        filters.append("category = %s")
+                        params.append(category)
+
+                    query = f'''
+                        SELECT *
+                        FROM review_logs
+                        WHERE {' AND '.join(filters)}
+                          {season_clause}
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT %s
+                    '''
+                    cursor.execute(query, tuple(params) + season_params + (limit,))
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to get review logs: {e}")
+            return []
+
+    def get_user_reviews_for_title(self, user_id, title, category):
+        """특정 제목에 대한 사용자의 모든 리뷰(시즌별 포함) 조회."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute('''
+                        SELECT
+                            r.*,
+                            COALESCE(c.title, r.movie_title) as movie_title,
+                            COALESCE(c.category, r.category) as category,
+                            COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                            COALESCE(c.creator, r.director) as director,
+                            COALESCE(c.img_url, r.img_url) as img_url,
+                            c.title as content_title,
+                            c.category as content_category
+                        FROM reviews r
+                        JOIN contents c ON r.content_id = c.id
+                        WHERE r.user_id = %s AND c.title = %s AND c.category = %s
+                        ORDER BY r.season ASC NULLS FIRST, r.created_at DESC
+                    ''', (user_id, title, category))
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to get user reviews for title: {e}")
+            return []
+
     def get_review_by_message_id(self, message_id):
         """message_id로 리뷰 조회"""
         try:
             with get_conn() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     cursor.execute('''
-                        SELECT * FROM reviews WHERE message_id = %s
+                        SELECT
+                            r.*,
+                            COALESCE(c.title, r.movie_title) as movie_title,
+                            COALESCE(c.category, r.category) as category,
+                            COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                            COALESCE(c.creator, r.director) as director,
+                            COALESCE(c.img_url, r.img_url) as img_url
+                        FROM reviews r
+                        LEFT JOIN contents c ON r.content_id = c.id
+                        WHERE r.message_id = %s
                     ''', (message_id,))
                     return cursor.fetchone()
         except Exception as e:
@@ -757,21 +1013,37 @@ class Database:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     if category:
                         cursor.execute('''
-                            SELECT r.*, COUNT(rr.id) as reaction_count
+                            SELECT
+                                r.*,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                COALESCE(c.img_url, r.img_url) as img_url,
+                                COUNT(rr.id) as reaction_count
                             FROM reviews r
+                            LEFT JOIN contents c ON r.content_id = c.id
                             LEFT JOIN review_reactions rr ON r.id = rr.review_id
-                            WHERE r.category = %s
-                            GROUP BY r.id
+                            WHERE COALESCE(c.category, r.category) = %s
+                            GROUP BY r.id, c.title, c.category, c.year_or_platform, c.creator, c.img_url
                             HAVING COUNT(rr.id) > 0
                             ORDER BY reaction_count DESC, r.created_at DESC
                             LIMIT %s
                         ''', (category, limit))
                     else:
                         cursor.execute('''
-                            SELECT r.*, COUNT(rr.id) as reaction_count
+                            SELECT
+                                r.*,
+                                COALESCE(c.title, r.movie_title) as movie_title,
+                                COALESCE(c.category, r.category) as category,
+                                COALESCE(c.year_or_platform, r.movie_year) as movie_year,
+                                COALESCE(c.creator, r.director) as director,
+                                COALESCE(c.img_url, r.img_url) as img_url,
+                                COUNT(rr.id) as reaction_count
                             FROM reviews r
+                            LEFT JOIN contents c ON r.content_id = c.id
                             LEFT JOIN review_reactions rr ON r.id = rr.review_id
-                            GROUP BY r.id
+                            GROUP BY r.id, c.title, c.category, c.year_or_platform, c.creator, c.img_url
                             HAVING COUNT(rr.id) > 0
                             ORDER BY reaction_count DESC, r.created_at DESC
                             LIMIT %s
@@ -783,7 +1055,7 @@ class Database:
 
     def save_migrated_review(self, user_id, username, movie_title, movie_year, director,
                               score, one_line_review, category='movie', created_at=None,
-                              message_id=None, channel_id=None):
+                              message_id=None, channel_id=None, season=None):
         """마이그레이션된 리뷰 저장 (중복 체크 없이)"""
         try:
             with get_conn() as conn:
@@ -793,26 +1065,26 @@ class Database:
                             INSERT INTO reviews
                             (user_id, username, movie_title, movie_year, director, score,
                              one_line_review, additional_comment, category,
-                             message_id, channel_id, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             message_id, channel_id, created_at, season)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING id
                         ''', (
                             user_id, username, movie_title, movie_year,
                             director, score, one_line_review, None,
-                            category, message_id, channel_id, created_at
+                            category, message_id, channel_id, created_at, season
                         ))
                     else:
                         cursor.execute('''
                             INSERT INTO reviews
                             (user_id, username, movie_title, movie_year, director, score,
                              one_line_review, additional_comment, category,
-                             message_id, channel_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             message_id, channel_id, season)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING id
                         ''', (
                             user_id, username, movie_title, movie_year,
                             director, score, one_line_review, None,
-                            category, message_id, channel_id
+                            category, message_id, channel_id, season
                         ))
                     conn.commit()
                     return cursor.fetchone()[0]

@@ -508,10 +508,11 @@ class GrokSearcher:
 
         chat.append(system("""You are a parser that extracts review information from unstructured text messages.
 Extract the following fields and return ONLY valid JSON (no markdown, no explanation):
-- title: The title of the content being reviewed (movie, drama, anime, manga, webtoon)
+- title: The title of the content being reviewed (movie, drama, anime, manga, webtoon, webnovel)
 - score: Rating score (convert to 0-5 scale, e.g. "8/10" → 4.0, "A+" → 5.0, "별 4개" → 4.0)
 - one_line_review: The main review comment or opinion
-- category: One of "movie", "drama", "anime", "manga", "webtoon" (guess based on context)
+- category: One of "movie", "drama", "anime", "manga", "webtoon", "webnovel" (guess based on context)
+- season: Season/part number if mentioned (e.g. "2기", "시즌3", "1부"; otherwise null)
 - year: Release year if mentioned (otherwise null)
 - director: Director or author name if mentioned (otherwise null)
 

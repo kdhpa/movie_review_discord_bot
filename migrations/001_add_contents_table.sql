@@ -40,6 +40,8 @@ BEGIN
     ALTER TABLE reviews ADD COLUMN IF NOT EXISTS content_id INTEGER;
     ALTER TABLE reviews ADD COLUMN IF NOT EXISTS unit_from INTEGER;
     ALTER TABLE reviews ADD COLUMN IF NOT EXISTS unit_to INTEGER;
+    ALTER TABLE reviews ADD COLUMN IF NOT EXISTS latest_units INTEGER;
+    ALTER TABLE reviews ADD COLUMN IF NOT EXISTS source_url TEXT;
 EXCEPTION WHEN duplicate_column THEN
     RAISE NOTICE 'Columns already exist, skipping';
 END $$;
