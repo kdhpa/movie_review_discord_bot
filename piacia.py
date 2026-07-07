@@ -29,6 +29,9 @@ WEBNOVEL_PLATFORM_ALIASES = {
 }
 WEBNOVEL_PLATFORM_DOMAINS = {
     "novelpia.com": "노벨피아",
+    "novelpia.co.kr": "노벨피아",
+    "novelpia.page.link": "노벨피아",
+    "novelpia.app.link": "노벨피아",
     "munpia.com": "문피아",
     "page.kakao.com": "카카오페이지",
     "series.naver.com": "시리즈",
@@ -167,12 +170,25 @@ def normalize_source_url(url):
     url = (url or "").strip()
     if not url:
         return None
+
+    markdown_match = re.search(r'\((https?://[^)\s]+)\)', url)
+    if markdown_match:
+        url = markdown_match.group(1)
+
+    url_match = re.search(r'https?://[^\s<>]+', url)
+    if url_match:
+        url = url_match.group(0)
+    else:
+        url = url.strip("<> \t\r\n")
+
     if not re.match(r'^https?://', url, re.IGNORECASE):
         url = f"https://{url}"
+
+    url = url.strip("<> \t\r\n")
     parsed = urlparse(url)
     if not parsed.netloc:
         return None
-    return url
+    return parsed.geturl()
 
 
 def detect_webnovel_platform_from_url(url):
@@ -871,6 +887,10 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.display_name = author_name
         self.author_name = id_name
         self.author_id = author_id
+        self.source_url = normalize_source_url(source_url)
+        if detect_webnovel_platform_from_url(self.source_url):
+            self.category = 'webnovel'
+
         # 리뷰 데이터 (on_submit에서 저장)
         self.score = None
         self.line_comment = None
@@ -878,7 +898,6 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.unit_to = None  # 진행도 (manga/webtoon/webnovel)
         self.season = default_season
         self.latest_units = latest_units
-        self.source_url = normalize_source_url(source_url)
         # URL로 미리 가져온 만화 정보 (title, year, author, img_url)
         self.prefetched_info = prefetched_info
         self.prefetched_category = prefetched_category
@@ -1270,7 +1289,9 @@ class ReviewLaunchView(discord.ui.View):
         self.author_id = author_id
         self.author_name = author_name
         self.display_name = display_name
-        self.source_url = source_url
+        self.source_url = normalize_source_url(source_url)
+        if detect_webnovel_platform_from_url(self.source_url):
+            self.category = 'webnovel'
         self.default_season = default_season
         self.latest_units = latest_units
 
