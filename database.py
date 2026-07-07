@@ -565,6 +565,23 @@ class Database:
             print(f"❌ Failed to delete review: {e}")
             return False
 
+    def delete_review_by_id(self, user_id, review_id):
+        """메시지 컨텍스트 메뉴에서 선택한 리뷰 row를 직접 삭제."""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute('''
+                        DELETE FROM reviews
+                        WHERE id = %s AND user_id = %s
+                        RETURNING id
+                    ''', (review_id, user_id))
+                    deleted = cursor.fetchone()
+                    conn.commit()
+                    return deleted is not None
+        except Exception as e:
+            print(f"❌ Failed to delete review by id: {e}")
+            return False
+
     def get_user_review(self, user_id, title, category=None, season=_NO_SEASON_FILTER):
         """사용자의 특정 작품 리뷰 조회 (v2 호환)"""
         try:

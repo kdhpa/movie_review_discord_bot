@@ -109,6 +109,31 @@ def parse_review_detail(content):
     return director, year
 
 
+def resolve_review_message(db, message):
+    """컨텍스트 메뉴 대상 메시지에서 리뷰 식별 정보를 찾는다.
+
+    새 리뷰 메시지는 DB에 message_id가 저장되므로 그것을 우선 사용하고,
+    오래된 메시지나 DB row를 찾지 못한 경우에만 텍스트 포맷 파싱으로 fallback한다.
+    """
+    review = db.get_review_by_message_id(message.id)
+    if review:
+        channel_id = review.get('channel_id')
+        if channel_id is not None and int(channel_id) != message.channel.id:
+            print(
+                f"[WARN] resolve_review_message() channel mismatch: "
+                f"db={channel_id}, message={message.channel.id}"
+            )
+        return (
+            review.get('movie_title'),
+            review.get('category'),
+            review.get('season'),
+            review
+        )
+
+    title, category, season = parse_review_message(message.content)
+    return title, category, season, None
+
+
 def parse_webnovel_meta(meta_text):
     """웹소설 수동 입력값에서 작가, 플랫폼을 분리."""
     meta_text = (meta_text or "").strip()
@@ -2077,10 +2102,16 @@ async def edit_review_context(interaction: discord.Interaction, message: discord
         await interaction.response.send_message("❌ 봇이 보낸 리뷰 메시지만 수정할 수 있습니다.", ephemeral=True)
         return
 
-    # 메시지에서 title, category, season 파싱
-    title, category, season = parse_review_message(message.content)
+    # 메시지에서 title, category, season 파싱 (message_id 우선)
+    title, category, season, message_review = resolve_review_message(bot.db, message)
     if not title or not category:
         await interaction.response.send_message("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
+        return
+
+    if message_review and int(message_review['user_id']) != interaction.user.id:
+        await interaction.response.send_message(
+            f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
+        )
         return
 
     # DB에서 리뷰 조회 (소유권 확인)
@@ -2121,17 +2152,23 @@ async def write_review_context(interaction: discord.Interaction, message: discor
         await interaction.response.send_message("❌ 봇이 보낸 리뷰 메시지에서만 사용할 수 있습니다.", ephemeral=True)
         return
 
-    # 메시지에서 title, category, season 파싱
-    title, db_category, season = parse_review_message(message.content)
+    # 메시지에서 title, category, season 파싱 (message_id 우선)
+    title, db_category, season, message_review = resolve_review_message(bot.db, message)
     if not title or not db_category:
         await interaction.response.send_message("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
         return
 
     # director, year 파싱
-    director, year = parse_review_detail(message.content)
+    if message_review:
+        director = message_review.get('director')
+        year = message_review.get('movie_year')
+    else:
+        director, year = parse_review_detail(message.content)
 
     # 포스터 이미지 URL 획득
-    img_url = message.attachments[0].url if message.attachments else None
+    img_url = message_review.get('img_url') if message_review else None
+    if not img_url:
+        img_url = message.attachments[0].url if message.attachments else None
 
     search_category = CATEGORY_TO_SEARCH[db_category]
     prefetched_info = (title, year, director, img_url)
@@ -2159,21 +2196,27 @@ async def delete_review_context(interaction: discord.Interaction, message: disco
         await interaction.followup.send("❌ 봇이 보낸 리뷰 메시지만 삭제할 수 있습니다.", ephemeral=True)
         return
 
-    # 메시지에서 title, category, season 파싱
-    title, category, season = parse_review_message(message.content)
+    # 메시지에서 title, category, season 파싱 (message_id 우선)
+    title, category, season, message_review = resolve_review_message(bot.db, message)
     if not title or not category:
         await interaction.followup.send("❌ 리뷰 메시지를 인식할 수 없습니다.", ephemeral=True)
         return
 
+    if message_review and int(message_review['user_id']) != interaction.user.id:
+        await interaction.followup.send(
+            f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
+        )
+        return
+
     # DB에서 리뷰 조회 (소유권 확인)
-    review = bot.db.get_user_review(interaction.user.id, title, category, season=season)
+    review = message_review or bot.db.get_user_review(interaction.user.id, title, category, season=season)
     if not review:
         await interaction.followup.send(
             f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
         )
         return
 
-    if not is_current_review_message(review, message):
+    if not message_review and not is_current_review_message(review, message):
         await interaction.followup.send(
             "❌ 최신 리뷰 메시지에서만 삭제할 수 있습니다. 가장 최근에 전송된 리뷰 메시지로 다시 시도해주세요.",
             ephemeral=True
@@ -2181,7 +2224,10 @@ async def delete_review_context(interaction: discord.Interaction, message: disco
         return
 
     # DB 삭제
-    deleted = bot.db.delete_review(interaction.user.id, title, category, season=season)
+    if message_review:
+        deleted = bot.db.delete_review_by_id(interaction.user.id, message_review['id'])
+    else:
+        deleted = bot.db.delete_review(interaction.user.id, title, category, season=season)
     if not deleted:
         await interaction.followup.send("❌ 리뷰 삭제에 실패했습니다.", ephemeral=True)
         return
