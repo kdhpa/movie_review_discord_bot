@@ -3,7 +3,7 @@ import aiohttp
 import asyncio
 import re
 import html as html_lib
-from urllib.parse import urlparse, urljoin
+from urllib.parse import parse_qs, urlparse, urljoin
 from discord.ext import commands
 from review_form import (
     MOVIE_FORM,
@@ -46,6 +46,14 @@ WEBNOVEL_PLATFORM_DOMAINS = {
     "series.naver.com": "시리즈",
     "ridibooks.com": "리디",
     "ridi.com": "리디",
+}
+MUSIC_LINK_DOMAINS = {
+    "open.spotify.com",
+    "spotify.link",
+    "music.youtube.com",
+    "youtube.com",
+    "www.youtube.com",
+    "youtu.be",
 }
 from database import Database
 from api_searcher import ContentSearcher, GrokSearcher
@@ -212,6 +220,276 @@ def detect_webnovel_platform_from_url(url):
     for domain, platform in WEBNOVEL_PLATFORM_DOMAINS.items():
         if host == domain or host.endswith(f".{domain}"):
             return platform
+    return None
+
+
+def normalize_host(url):
+    host = urlparse(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def is_music_link(url):
+    source_url = normalize_source_url(url)
+    if not source_url:
+        return False
+
+    host = normalize_host(source_url)
+    return (
+        host in MUSIC_LINK_DOMAINS
+        or host.endswith(".spotify.com")
+        or host.endswith(".youtube.com")
+    )
+
+
+def should_handle_as_music_link(url, category):
+    if not is_music_link(url):
+        return False
+
+    host = normalize_host(url)
+    if host == "spotify.link" or host.endswith("spotify.com") or host == "music.youtube.com":
+        return True
+    return category in MUSIC_CATEGORIES
+
+
+def parse_spotify_type_from_url(url):
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    for idx, part in enumerate(parts):
+        if part in ("album", "track") and idx + 1 < len(parts):
+            return part, parts[idx + 1]
+    return None, None
+
+
+def parse_spotify_type_from_embed(html):
+    match = re.search(r'open\.spotify\.com/embed(?:/[a-z-]+)?/(album|track)/([A-Za-z0-9]+)', html or "")
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+
+
+def parse_youtube_music_type(url):
+    parsed = urlparse(url)
+    host = normalize_host(url)
+    if host == "youtu.be":
+        return "music_track"
+    if parsed.path.startswith("/watch"):
+        return "music_track"
+    if parsed.path.startswith("/playlist"):
+        return "music_album"
+    return None
+
+
+def clean_spotify_title(raw_title, category):
+    title = (raw_title or "").strip()
+    if not title:
+        return None, None
+
+    title = re.sub(r'\s*\|\s*Spotify\s*$', '', title, flags=re.IGNORECASE).strip()
+    patterns = [
+        r'^(?P<title>.+?)\s+-\s+song and lyrics by\s+(?P<artist>.+)$',
+        r'^(?P<title>.+?)\s+-\s+song by\s+(?P<artist>.+)$',
+        r'^(?P<title>.+?)\s+-\s+album by\s+(?P<artist>.+)$',
+        r'^(?P<title>.+?)\s+by\s+(?P<artist>.+)$',
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, title, flags=re.IGNORECASE)
+        if match:
+            return match.group('title').strip(), match.group('artist').strip()
+
+    parts = [part.strip() for part in re.split(r'\s*[·•]\s*', title) if part.strip()]
+    if len(parts) >= 2:
+        if category == "music_album":
+            return parts[0], parts[1]
+        return parts[0], parts[1]
+
+    return title, None
+
+
+def parse_music_artist_from_description(description):
+    description = (description or "").strip()
+    if not description:
+        return None
+
+    parts = [part.strip() for part in re.split(r'\s*[·•]\s*', description) if part.strip()]
+    if len(parts) >= 2:
+        return parts[1]
+    return None
+
+
+def parse_spotify_artist_from_description(description):
+    description = (description or "").strip()
+    if not description:
+        return None
+
+    parts = [part.strip() for part in re.split(r'\s*[·•]\s*', description) if part.strip()]
+    if not parts:
+        return None
+    if parts[0].lower() in ("song", "album", "single", "ep") and len(parts) >= 2:
+        return parts[1]
+    if parts[0].lower().startswith("listen to ") and len(parts) >= 2:
+        return parts[1]
+    return parts[0]
+
+
+def first_year_from_text(value):
+    match = re.search(r'\b(19|20)\d{2}\b', str(value or ""))
+    return match.group(0) if match else None
+
+
+def clean_youtube_artist(author_name):
+    artist = (author_name or "").strip()
+    artist = re.sub(r'\s*-\s*Topic$', '', artist, flags=re.IGNORECASE).strip()
+    return artist or "미상"
+
+
+def parse_youtube_title_artist(title, author_name):
+    title = (title or "").strip()
+    artist = clean_youtube_artist(author_name)
+    if " - " in title:
+        left, right = [part.strip() for part in title.split(" - ", 1)]
+        if left and right and left.lower() == artist.lower():
+            return right, artist
+    return title, artist
+
+
+async def fetch_page_meta(session, source_url):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
+    try:
+        async with session.get(source_url, headers=headers) as response:
+            if response.status != 200:
+                return {}
+            html = await response.text()
+            return {
+                "title": extract_page_title(html),
+                "description": extract_meta_content(html, "og:description", "twitter:description", "description"),
+                "image": extract_page_image(html, source_url),
+                "author": extract_meta_content(html, "author", "article:author"),
+                "release_date": extract_meta_content(html, "music:release_date"),
+            }
+    except Exception as e:
+        print(f"[WARN] fetch_page_meta() failed: {e}")
+        return {}
+
+
+async def fetch_spotify_music_by_url(session, source_url, fallback_category):
+    spotify_type, spotify_id = parse_spotify_type_from_url(source_url)
+    oembed_data = {}
+    try:
+        async with session.get(
+            "https://open.spotify.com/oembed",
+            params={"url": source_url},
+            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+        ) as response:
+            if response.status == 200:
+                oembed_data = await response.json()
+            else:
+                print(f"[WARN] Spotify oEmbed status={response.status}")
+    except Exception as e:
+        print(f"[WARN] Spotify oEmbed failed: {e}")
+
+    if not spotify_type:
+        spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
+
+    if spotify_type == "album":
+        category = "music_album"
+    elif spotify_type == "track":
+        category = "music_track"
+    else:
+        category = fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
+
+    title, artist = clean_spotify_title(oembed_data.get("title"), category)
+    img_url = oembed_data.get("thumbnail_url")
+
+    page_meta = await fetch_page_meta(session, source_url)
+    if not title and page_meta.get("title"):
+        title, page_artist = clean_spotify_title(page_meta["title"], category)
+        artist = artist or page_artist
+    artist = artist or parse_spotify_artist_from_description(page_meta.get("description"))
+    artist = artist or page_meta.get("author") or "미상"
+    img_url = img_url or page_meta.get("image")
+    year = (
+        first_year_from_text(page_meta.get("release_date"))
+        or first_year_from_text(page_meta.get("description"))
+        or "N/A"
+    )
+
+    if not title:
+        return None
+
+    return {
+        "title": title,
+        "year": year,
+        "director": artist,
+        "img_url": img_url,
+        "category": category,
+        "source_url": source_url,
+        "provider_id": spotify_id,
+        "provider": "spotify",
+    }
+
+
+async def fetch_youtube_music_by_url(session, source_url, fallback_category):
+    parsed = urlparse(source_url)
+    query = parse_qs(parsed.query)
+    oembed_url = source_url
+    if normalize_host(source_url) == "music.youtube.com" and parsed.path.startswith("/watch") and query.get("v"):
+        oembed_url = f"https://www.youtube.com/watch?v={query['v'][0]}"
+
+    category = parse_youtube_music_type(source_url) or (
+        fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
+    )
+
+    oembed_data = {}
+    try:
+        async with session.get(
+            "https://www.youtube.com/oembed",
+            params={"url": oembed_url, "format": "json"},
+            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+        ) as response:
+            if response.status == 200:
+                oembed_data = await response.json()
+            else:
+                print(f"[WARN] YouTube oEmbed status={response.status}")
+    except Exception as e:
+        print(f"[WARN] YouTube oEmbed failed: {e}")
+
+    title, artist = parse_youtube_title_artist(
+        oembed_data.get("title"),
+        oembed_data.get("author_name")
+    )
+    img_url = oembed_data.get("thumbnail_url")
+
+    if not title:
+        page_meta = await fetch_page_meta(session, source_url)
+        title = clean_webnovel_title(page_meta.get("title"), "YouTube Music")
+        artist = artist or page_meta.get("author") or parse_music_artist_from_description(page_meta.get("description"))
+        img_url = img_url or page_meta.get("image")
+
+    if not title:
+        return None
+
+    return {
+        "title": title,
+        "year": "N/A",
+        "director": artist or "미상",
+        "img_url": img_url,
+        "category": category,
+        "source_url": source_url,
+        "provider": "youtube_music",
+    }
+
+
+async def fetch_music_by_url(session, source_url, fallback_category):
+    host = normalize_host(source_url)
+    if host == "spotify.link" or host.endswith("spotify.com"):
+        return await fetch_spotify_music_by_url(session, source_url, fallback_category)
+    if host in ("music.youtube.com", "youtube.com", "youtu.be") or host.endswith(".youtube.com"):
+        return await fetch_youtube_music_by_url(session, source_url, fallback_category)
     return None
 
 
@@ -946,16 +1224,27 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.prefetched_info = prefetched_info
         self.prefetched_category = prefetched_category
 
-        if self.category in MUSIC_CATEGORIES and not prefetched_info:
-            self.add_item(discord.ui.TextInput(
+        if self.category in MUSIC_CATEGORIES:
+            title_default = prefetched_info[0] if prefetched_info and prefetched_info[0] else None
+            artist_default = prefetched_info[2] if prefetched_info and len(prefetched_info) > 2 and prefetched_info[2] else None
+
+            title_input = discord.ui.TextInput(
                 label="음악 이름",
                 placeholder="앨범명 또는 곡명을 입력하세요"
-            ))
-            self.add_item(discord.ui.TextInput(
+            )
+            if title_default:
+                title_input.default = title_default
+            self.add_item(title_input)
+
+            artist_input = discord.ui.TextInput(
                 label="아티스트 (선택)",
                 placeholder="동명이 많은 경우 입력하세요",
                 required=False
-            ))
+            )
+            if artist_default and artist_default != "미상":
+                artist_input.default = artist_default
+            self.add_item(artist_input)
+
             self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
             self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
             self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
@@ -1044,12 +1333,16 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         is_music = self.category in MUSIC_CATEGORIES
 
         # prefetched_info가 있으면 필드 인덱스가 다름 (제목 필드 추가됨)
-        if is_music and not self.prefetched_info:
+        if is_music:
             title = self.children[0].value.strip()
             self.music_artist_query = self.children[1].value.strip() or None
             score = self.children[2].value
             self.line_comment = self.children[3].value
             self.comment = self.children[4].value
+            if self.prefetched_info:
+                year = self.prefetched_info[1] or "N/A"
+                director = self.music_artist_query or self.prefetched_info[2] or "미상"
+                img_url = self.prefetched_info[3] if len(self.prefetched_info) > 3 else None
             print(
                 f"[DEBUG] ReviewForm.on_submit() 음악 입력 - "
                 f"title: {title}, artist: {self.music_artist_query}, score: {score}"
@@ -1862,7 +2155,7 @@ bot = MyBot(command_prefix="/", intents=intents)
 @discord.app_commands.command(name="한줄평", description="리뷰를 작성합니다.")
 @discord.app_commands.describe(
     카테고리="리뷰할 콘텐츠 종류",
-    링크="MangaDex 또는 웹소설 작품 링크 (선택)",
+    링크="MangaDex, 웹소설, Spotify, YouTube Music 링크 (선택)",
     기수="시즌/기/부 번호 (선택)",
     최신화="현재 공개된 최신 화/권 수 (진행률 계산용, 선택)"
 )
@@ -1881,10 +2174,69 @@ async def review_command(
     기수: int = None,
     최신화: int = None
 ):
+    source_url = normalize_source_url(링크)
+    if 링크 and not source_url:
+        await send_ephemeral_interaction(interaction, "❌ 유효하지 않은 링크입니다.")
+        return
+
+    if source_url and should_handle_as_music_link(source_url, 카테고리):
+        try:
+            timeout = aiohttp.ClientTimeout(total=2.3)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                music_info = await fetch_music_by_url(session, source_url, 카테고리)
+        except Exception as e:
+            print(f"[WARN] review_command() 음악 링크 메타데이터 조회 실패: {e}")
+            music_info = None
+
+        if not music_info:
+            await send_ephemeral_interaction(
+                interaction,
+                "❌ 음악 링크 정보를 가져오지 못했습니다. Spotify 트랙/앨범 또는 YouTube Music 곡 링크인지 확인해주세요."
+            )
+            return
+
+        카테고리 = music_info['category']
+        prefetched_info = (
+            music_info['title'],
+            music_info.get('year') or "N/A",
+            music_info.get('director') or "미상",
+            music_info.get('img_url')
+        )
+        modal = ReviewForm(
+            bot.db,
+            카테고리,
+            interaction.user.id,
+            str(interaction.user),
+            interaction.user.display_name,
+            prefetched_info=prefetched_info,
+            prefetched_category=카테고리,
+            source_url=source_url
+        )
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.HTTPException as e:
+            print(
+                f"[ERROR] review_command() 음악 링크 모달 전송 실패 "
+                f"(code={getattr(e, 'code', None)}, source_url={source_url})",
+                flush=True
+            )
+            if not interaction.response.is_done():
+                await send_ephemeral_interaction(
+                    interaction,
+                    "❌ 음악 링크 정보를 가져왔지만 입력창을 여는 중 Discord 응답이 만료되었습니다. 다시 시도해주세요."
+                )
+        return
+
+    if source_url and 카테고리 in MUSIC_CATEGORIES:
+        await send_ephemeral_interaction(
+            interaction,
+            "❌ 음악 링크는 Spotify 또는 YouTube Music 링크만 지원합니다."
+        )
+        return
+
     if not await defer_ephemeral_interaction(interaction, "review_command()"):
         return
 
-    source_url = normalize_source_url(링크)
     detected_webnovel_platform = detect_webnovel_platform_from_url(source_url) if source_url else None
     if detected_webnovel_platform and 카테고리 != 'webnovel':
         print(
@@ -1898,10 +2250,6 @@ async def review_command(
         return
     if 최신화 is not None and 최신화 <= 0:
         await send_ephemeral_interaction(interaction, "❌ 최신화는 1 이상으로 입력해주세요.")
-        return
-
-    if 링크 and not source_url:
-        await send_ephemeral_interaction(interaction, "❌ 유효하지 않은 링크입니다.")
         return
 
     view = ReviewLaunchView(
