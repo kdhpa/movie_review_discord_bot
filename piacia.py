@@ -368,8 +368,10 @@ async def fetch_page_meta(session, source_url):
                 "title": extract_page_title(html),
                 "description": extract_meta_content(html, "og:description", "twitter:description", "description"),
                 "image": extract_page_image(html, source_url),
+                "type": extract_meta_content(html, "og:type"),
                 "author": extract_meta_content(html, "author", "article:author"),
                 "release_date": extract_meta_content(html, "music:release_date"),
+                "musician": extract_meta_content(html, "music:musician_description"),
             }
     except Exception as e:
         print(f"[WARN] fetch_page_meta() failed: {e}")
@@ -378,23 +380,6 @@ async def fetch_page_meta(session, source_url):
 
 async def fetch_spotify_music_by_url(session, source_url, fallback_category):
     spotify_type, spotify_id = parse_spotify_type_from_url(source_url)
-    oembed_data = {}
-    try:
-        async with session.get(
-            "https://open.spotify.com/oembed",
-            params={"url": source_url},
-            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
-        ) as response:
-            if response.status == 200:
-                oembed_data = await response.json()
-            else:
-                print(f"[WARN] Spotify oEmbed status={response.status}")
-    except Exception as e:
-        print(f"[WARN] Spotify oEmbed failed: {e}")
-
-    if not spotify_type:
-        spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
-
     if spotify_type == "album":
         category = "music_album"
     elif spotify_type == "track":
@@ -402,21 +387,57 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
     else:
         category = fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
 
-    title, artist = clean_spotify_title(oembed_data.get("title"), category)
-    img_url = oembed_data.get("thumbnail_url")
-
     page_meta = await fetch_page_meta(session, source_url)
-    if not title and page_meta.get("title"):
-        title, page_artist = clean_spotify_title(page_meta["title"], category)
-        artist = artist or page_artist
-    artist = artist or parse_spotify_artist_from_description(page_meta.get("description"))
-    artist = artist or page_meta.get("author") or "미상"
-    img_url = img_url or page_meta.get("image")
+    page_type = (page_meta.get("type") or "").lower()
+    if not spotify_type and page_type in ("music.song", "music: song"):
+        spotify_type = "track"
+        category = "music_track"
+    elif not spotify_type and page_type in ("music.album", "music: album"):
+        spotify_type = "album"
+        category = "music_album"
+
+    title, page_artist = clean_spotify_title(page_meta.get("title"), category)
+    artist = (
+        page_meta.get("musician")
+        or page_artist
+        or parse_spotify_artist_from_description(page_meta.get("description"))
+        or page_meta.get("author")
+    )
+    img_url = page_meta.get("image")
     year = (
         first_year_from_text(page_meta.get("release_date"))
         or first_year_from_text(page_meta.get("description"))
-        or "N/A"
     )
+
+    oembed_data = {}
+    if not title or not img_url or not spotify_type:
+        try:
+            async with session.get(
+                "https://open.spotify.com/oembed",
+                params={"url": source_url},
+                headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+            ) as response:
+                if response.status == 200:
+                    oembed_data = await response.json()
+                else:
+                    print(f"[WARN] Spotify oEmbed status={response.status}")
+        except Exception as e:
+            print(f"[WARN] Spotify oEmbed failed: {e}")
+
+        if not spotify_type:
+            spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
+            if spotify_type == "album":
+                category = "music_album"
+            elif spotify_type == "track":
+                category = "music_track"
+
+        if not title:
+            title, oembed_artist = clean_spotify_title(oembed_data.get("title"), category)
+            artist = artist or oembed_artist
+        img_url = img_url or oembed_data.get("thumbnail_url")
+
+    artist = artist or "미상"
+    year = year or "N/A"
 
     if not title:
         return None
@@ -463,19 +484,22 @@ async def fetch_youtube_music_by_url(session, source_url, fallback_category):
         oembed_data.get("author_name")
     )
     img_url = oembed_data.get("thumbnail_url")
+    year = None
 
-    if not title:
+    if not title or not year:
         page_meta = await fetch_page_meta(session, source_url)
-        title = clean_webnovel_title(page_meta.get("title"), "YouTube Music")
+        if not title:
+            title = clean_webnovel_title(page_meta.get("title"), "YouTube Music")
         artist = artist or page_meta.get("author") or parse_music_artist_from_description(page_meta.get("description"))
         img_url = img_url or page_meta.get("image")
+        year = first_year_from_text(page_meta.get("release_date")) or first_year_from_text(page_meta.get("description"))
 
     if not title:
         return None
 
     return {
         "title": title,
-        "year": "N/A",
+        "year": year or "N/A",
         "director": artist or "미상",
         "img_url": img_url,
         "category": category,
