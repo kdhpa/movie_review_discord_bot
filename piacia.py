@@ -5,11 +5,20 @@ import re
 import html as html_lib
 from urllib.parse import urlparse, urljoin
 from discord.ext import commands
-from review_form import MOVIE_FORM, MANGA_FORM, WEBTOON_FORM, WEBNOVEL_FORM, format_season
+from review_form import (
+    MOVIE_FORM,
+    MANGA_FORM,
+    WEBTOON_FORM,
+    WEBNOVEL_FORM,
+    MUSIC_ALBUM_FORM,
+    MUSIC_TRACK_FORM,
+    format_season,
+)
 
 # 카테고리별 이모지 및 이름 매핑
-CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱", "webnovel": "📖"}
-CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰", "webnovel": "웹소설"}
+CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱", "webnovel": "📖", "music_album": "💿", "music_track": "🎵"}
+CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰", "webnovel": "웹소설", "music_album": "앨범", "music_track": "곡"}
+MUSIC_CATEGORIES = {"music_album", "music_track"}
 PROGRESS_UNIT_LABELS = {"manga": "권", "webtoon": "화", "webnovel": "화"}
 WEBNOVEL_PLATFORM_ALIASES = {
     "문피아": "문피아",
@@ -98,13 +107,13 @@ def parse_review_detail(content):
         return None, None
 
     director = None
-    for prefix in ['🎥감독: ', '✍️작가: ']:
+    for prefix in ['🎥감독: ', '✍️작가: ', '🎤아티스트: ']:
         if lines[1].startswith(prefix):
             director = lines[1][len(prefix):].strip()
             break
 
     year = None
-    for prefix in ['📅개봉년도: ', '📅연재년도: ', '📍플랫폼: ']:
+    for prefix in ['📅개봉년도: ', '📅연재년도: ', '📍플랫폼: ', '📅발매년도: ']:
         if lines[2].startswith(prefix):
             year = lines[2][len(prefix):].strip()
             break
@@ -579,7 +588,9 @@ async def _save_and_send_review(
         img_url=img_url,
         tmdb_id=movie_info.get('tmdb_id'),
         mangadex_id=movie_info.get('mangadex_id'),
-        naver_title_id=movie_info.get('naver_title_id')
+        naver_title_id=movie_info.get('naver_title_id'),
+        musicbrainz_id=movie_info.get('musicbrainz_id'),
+        musicbrainz_type=movie_info.get('musicbrainz_type')
     )
 
     if not content_id:
@@ -654,6 +665,26 @@ async def _save_and_send_review(
             one_line_text=line_comment,
             author_name = display_name
         )
+    elif db_category == 'music_album':
+        filled_form = MUSIC_ALBUM_FORM.format(
+            title=title,
+            season_text=season_text,
+            artist=director,
+            year=year,
+            score=return_score_emoji(score_float),
+            one_line_text=line_comment,
+            author_name=display_name
+        )
+    elif db_category == 'music_track':
+        filled_form = MUSIC_TRACK_FORM.format(
+            title=title,
+            season_text=season_text,
+            artist=director,
+            year=year,
+            score=return_score_emoji(score_float),
+            one_line_text=line_comment,
+            author_name=display_name
+        )
     else:  # webnovel
         filled_form = WEBNOVEL_FORM.format(
             title=title,
@@ -723,14 +754,23 @@ async def _save_and_send_review(
 
 # ==================== 통합 Modal ====================
 
+def truncate_option_text(value, limit=100):
+    value = str(value or "").replace("\n", " ").strip()
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
 class MovieSelectMenu(discord.ui.Select):
     """TMDB 검색 결과 선택 메뉴"""
 
     def __init__(self, movies: list, form: 'ReviewForm'):
         options = [
             discord.SelectOption(
-                label=f"{movie['title']} ({movie['year']})",
-                description=f"{CATEGORY_NAME[movie['category']]}",
+                label=truncate_option_text(f"{movie['title']} ({movie.get('year') or 'N/A'})"),
+                description=truncate_option_text(
+                    (movie.get('director') or CATEGORY_NAME[movie['category']])
+                    if movie.get('category') in MUSIC_CATEGORIES
+                    else CATEGORY_NAME[movie['category']]
+                ),
                 value=str(idx),
                 emoji=CATEGORY_EMOJI[movie['category']]
             )
@@ -757,15 +797,18 @@ class MovieSelectMenu(discord.ui.Select):
 
         await interaction.response.defer()
 
+        if movie.get('category') in MUSIC_CATEGORIES:
+            async with aiohttp.ClientSession() as session:
+                movie = await ContentSearcher.hydrate_music_result(session, movie)
         # 감독 정보 지연 로딩
-        if not movie.get('director'):
+        elif not movie.get('director'):
             print(f"[DEBUG] MovieSelectMenu.callback() 감독 정보 로딩 중...")
             async with aiohttp.ClientSession() as session:
                 movie['director'] = await ContentSearcher._fetch_director_info(
                     session, movie['tmdb_id'], movie['media_type']
                 )
 
-        movie['season'] = None if movie['category'] == 'movie' else self.form.season
+        movie['season'] = None if movie['category'] in ('movie', 'music_album', 'music_track') else self.form.season
         movie['latest_units'] = self.form.latest_units
 
         # 리뷰 저장 및 전송 - form에서 직접 참조
@@ -898,9 +941,25 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         self.unit_to = None  # 진행도 (manga/webtoon/webnovel)
         self.season = default_season
         self.latest_units = latest_units
+        self.music_artist_query = None
         # URL로 미리 가져온 만화 정보 (title, year, author, img_url)
         self.prefetched_info = prefetched_info
         self.prefetched_category = prefetched_category
+
+        if self.category in MUSIC_CATEGORIES and not prefetched_info:
+            self.add_item(discord.ui.TextInput(
+                label="음악 이름",
+                placeholder="앨범명 또는 곡명을 입력하세요"
+            ))
+            self.add_item(discord.ui.TextInput(
+                label="아티스트 (선택)",
+                placeholder="동명이 많은 경우 입력하세요",
+                required=False
+            ))
+            self.add_item(discord.ui.TextInput(label="별점 (0-5)", style=discord.TextStyle.short, placeholder="예: 4.5"))
+            self.add_item(discord.ui.TextInput(label="한줄평", style=discord.TextStyle.long, placeholder="한줄평을 입력하세요"))
+            self.add_item(discord.ui.TextInput(label="추가 코멘트", style=discord.TextStyle.paragraph, placeholder="추가 내용을 입력하세요", required=False))
+            return
 
         if self.category == 'webnovel':
             title_default = prefetched_info[0] if prefetched_info and prefetched_info[0] else None
@@ -982,9 +1041,20 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
         print(f"[DEBUG] ReviewForm.on_submit() 시작 - 카테고리: {self.category}, 작성자: {self.author_name}")
 
         is_manual_webnovel = self.category == 'webnovel'
+        is_music = self.category in MUSIC_CATEGORIES
 
         # prefetched_info가 있으면 필드 인덱스가 다름 (제목 필드 추가됨)
-        if is_manual_webnovel:
+        if is_music and not self.prefetched_info:
+            title = self.children[0].value.strip()
+            self.music_artist_query = self.children[1].value.strip() or None
+            score = self.children[2].value
+            self.line_comment = self.children[3].value
+            self.comment = self.children[4].value
+            print(
+                f"[DEBUG] ReviewForm.on_submit() 음악 입력 - "
+                f"title: {title}, artist: {self.music_artist_query}, score: {score}"
+            )
+        elif is_manual_webnovel:
             title = self.children[0].value.strip()
             director, year = parse_webnovel_meta(self.children[1].value)
             if self.prefetched_info:
@@ -1072,7 +1142,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 'director': director,
                 'img_url': img_url,
                 'category': prefetched_db_category,
-                'season': None if prefetched_db_category == 'movie' else self.season,
+                'season': None if prefetched_db_category in ('movie', 'music_album', 'music_track') else self.season,
                 'latest_units': self.latest_units,
                 'source_url': self.source_url
             }
@@ -1084,6 +1154,9 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                     movie_info['mangadex_id'] = external_id
                 elif prefetched_db_category == 'webtoon':
                     movie_info['naver_title_id'] = external_id
+                elif prefetched_db_category in MUSIC_CATEGORIES:
+                    movie_info['musicbrainz_id'] = external_id
+                    movie_info['musicbrainz_type'] = 'release-group' if prefetched_db_category == 'music_album' else 'recording'
 
             await _save_and_send_review(
                 interaction,
@@ -1204,6 +1277,60 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
 
                 await interaction.followup.send(
                     f"🔍 '{original_title}' 검색 결과 {len(movies)}개입니다. 작품을 선택하세요:",
+                    view=view,
+                    ephemeral=True
+                )
+                return
+
+            elif self.category in MUSIC_CATEGORIES:
+                if self.category == 'music_album':
+                    music_results = await ContentSearcher.search_music_album_multiple(
+                        session,
+                        title,
+                        artist=self.music_artist_query
+                    )
+                else:
+                    music_results = await ContentSearcher.search_music_track_multiple(
+                        session,
+                        title,
+                        artist=self.music_artist_query
+                    )
+
+                if not music_results:
+                    print(f"[DEBUG] ReviewForm.on_submit() 음악 검색 실패 - 결과 없음")
+                    artist_hint = " 아티스트명을 같이 입력해서" if not self.music_artist_query else ""
+                    await interaction.followup.send(
+                        f"❌ '{original_title}'를 찾을 수 없습니다.{artist_hint} 다시 시도해주세요.",
+                        ephemeral=True
+                    )
+                    return
+
+                if len(music_results) == 1:
+                    print(f"[DEBUG] ReviewForm.on_submit() 음악 단일 결과 - 자동 선택")
+                    music = await ContentSearcher.hydrate_music_result(session, music_results[0])
+                    music['season'] = None
+                    music['latest_units'] = self.latest_units
+
+                    await _save_and_send_review(
+                        interaction,
+                        self.db,
+                        music,
+                        self.category,
+                        self.score,
+                        self.line_comment,
+                        self.comment,
+                        self.author_id,
+                        self.author_name,
+                        self.display_name,
+                        unit_to=unit_to,
+                        latest_units=self.latest_units
+                    )
+                    return
+
+                print(f"[DEBUG] ReviewForm.on_submit() 음악 다중 결과 - Select Menu 표시 ({len(music_results)}개)")
+                view = MovieSelectView(music_results, self)
+                await interaction.followup.send(
+                    f"🔍 '{original_title}' 검색 결과 {len(music_results)}개입니다. 음악을 선택하세요:",
                     view=view,
                     ephemeral=True
                 )
@@ -1450,6 +1577,8 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
             search_category = 'manga'
         elif category == 'webtoon':
             search_category = 'webtoon'
+        elif category in MUSIC_CATEGORIES:
+            search_category = category
         else:
             search_category = 'webnovel'
 
@@ -1482,6 +1611,26 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                 season_text=season_text,
                 platform=year,
                 author=director,
+                score=return_score_emoji(score),
+                one_line_text=one_line_review,
+                author_name=self.display_name
+            )
+        elif search_category == 'music_album':
+            filled_form = MUSIC_ALBUM_FORM.format(
+                title=title,
+                season_text=season_text,
+                artist=director,
+                year=year,
+                score=return_score_emoji(score),
+                one_line_text=one_line_review,
+                author_name=self.display_name
+            )
+        elif search_category == 'music_track':
+            filled_form = MUSIC_TRACK_FORM.format(
+                title=title,
+                season_text=season_text,
+                artist=director,
+                year=year,
                 score=return_score_emoji(score),
                 one_line_text=one_line_review,
                 author_name=self.display_name
@@ -1584,6 +1733,24 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                     fetched_info = await fetch_webnovel_by_url(session, self.review_data['source_url'])
                     if fetched_info:
                         _, _, _, img_url, _ = fetched_info
+                elif search_category == 'music_album':
+                    music_results = await ContentSearcher.search_music_album_multiple(
+                        session,
+                        title,
+                        artist=director
+                    )
+                    if music_results:
+                        music = await ContentSearcher.hydrate_music_result(session, music_results[0])
+                        img_url = music.get('img_url')
+                elif search_category == 'music_track':
+                    music_results = await ContentSearcher.search_music_track_multiple(
+                        session,
+                        title,
+                        artist=director
+                    )
+                    if music_results:
+                        music = await ContentSearcher.hydrate_music_result(session, music_results[0])
+                        img_url = music.get('img_url')
 
             if img_url:
                 self.db.update_review(
@@ -1704,6 +1871,8 @@ bot = MyBot(command_prefix="/", intents=intents)
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="💿 앨범", value="music_album"),
+    discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
 async def review_command(
     interaction: discord.Interaction,
@@ -1779,6 +1948,8 @@ async def review_command(
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="앨범", value="music_album"),
+    discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def my_reviews_command(interaction: discord.Interaction, 카테고리: str = "all"):
     category = None if 카테고리 == "all" else 카테고리
@@ -1803,10 +1974,14 @@ async def my_reviews_command(interaction: discord.Interaction, 카테고리: str
         # 카테고리별 표시 형식
         if cat in ['webtoon', 'webnovel']:
             subtitle = f"- {review['movie_year']}"  # 플랫폼
+        elif cat in MUSIC_CATEGORIES:
+            subtitle = f"({review['movie_year']})" if review.get('movie_year') else ""
         else:
             subtitle = f"({review['movie_year']})"
 
         value = f"⭐ {score_emoji} {review['score']} /5\n💬 \"{review['one_line_review']}\""
+        if cat in MUSIC_CATEGORIES and review.get('director'):
+            value = f"🎤 {review['director']}\n{value}"
         if review.get('unit_to') is not None:
             progress_text = format_progress_text(
                 cat,
@@ -1837,6 +2012,8 @@ async def my_reviews_command(interaction: discord.Interaction, 카테고리: str
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="앨범", value="music_album"),
+    discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def stats_command(interaction: discord.Interaction, 제목: str, 카테고리: str = "all"):
     category = None if 카테고리 == "all" else 카테고리
@@ -1871,6 +2048,8 @@ async def stats_command(interaction: discord.Interaction, 제목: str, 카테고
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="💿 앨범", value="music_album"),
+    discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
 async def review_history_command(
     interaction: discord.Interaction,
@@ -1962,6 +2141,8 @@ async def review_history_command(
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="앨범", value="music_album"),
+    discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def delete_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None, 기수: int = None):
     await interaction.response.defer(ephemeral=True)
@@ -2054,6 +2235,8 @@ async def delete_review_command(interaction: discord.Interaction, 제목: str, �
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="앨범", value="music_album"),
+    discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def edit_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None, 기수: int = None):
     season_value, season_message = resolve_review_season(bot.db, interaction.user.id, 제목, 카테고리, 기수)
@@ -2163,7 +2346,16 @@ async def edit_review_context(interaction: discord.Interaction, message: discord
 
 
 # DB category → search category 매핑
-CATEGORY_TO_SEARCH = {'movie': 'tmdb', 'drama': 'tmdb', 'anime': 'tmdb', 'manga': 'manga', 'webtoon': 'webtoon', 'webnovel': 'webnovel'}
+CATEGORY_TO_SEARCH = {
+    'movie': 'tmdb',
+    'drama': 'tmdb',
+    'anime': 'tmdb',
+    'manga': 'manga',
+    'webtoon': 'webtoon',
+    'webnovel': 'webnovel',
+    'music_album': 'music_album',
+    'music_track': 'music_track',
+}
 
 
 @discord.app_commands.context_menu(name="나도 쓰기")
@@ -2413,6 +2605,8 @@ async def migration_command(interaction: discord.Interaction, 채널: discord.Te
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="💿 앨범", value="music_album"),
+    discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
 async def ranking_command(interaction: discord.Interaction, 카테고리: discord.app_commands.Choice[str] = None):
     await interaction.response.defer()

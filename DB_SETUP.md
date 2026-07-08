@@ -97,6 +97,10 @@ Logged in as YourBot#1234
 | message_id | BIGINT | Discord 리뷰 메시지 ID |
 | channel_id | BIGINT | Discord 리뷰 채널 ID |
 
+### `contents` 테이블
+
+작품/콘텐츠 메타데이터를 저장합니다. 음악 평론은 `music_album`, `music_track` 카테고리를 사용하며 `musicbrainz_id`, `musicbrainz_type`으로 MusicBrainz 항목을 구분합니다.
+
 ### `review_logs` 테이블
 
 수정/삭제 내역을 저장합니다. `season`, `unit_from`, `unit_to`, `latest_units`, `source_url`로 어느 기수/진행 구간의 리뷰가 수정 또는 삭제되었는지 구분합니다.
@@ -108,9 +112,10 @@ Logged in as YourBot#1234
 봇이 실행되면 Discord에서 다음 명령어 사용 가능:
 
 ### `/한줄평`
-- 영화/드라마/애니/만화/웹툰/웹소설 리뷰 작성
+- 영화/드라마/애니/만화/웹툰/웹소설/앨범/곡 리뷰 작성
 - `기수`, `최신화` 옵션으로 시즌/부와 진행률 표시 지원
 - 웹소설은 `링크` 옵션으로 노벨피아/문피아/카카오페이지/시리즈/리디 링크 저장 및 메타데이터 크롤링 시도
+- 앨범/곡은 MusicBrainz에서 메타데이터를 검색하고 Cover Art Archive에서 커버 이미지를 가져옵니다.
 - DB에 자동 저장됨
 
 ### `/내리뷰`

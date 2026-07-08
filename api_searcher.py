@@ -4,11 +4,27 @@ import json
 import asyncio
 from xai_sdk import Client
 from xai_sdk.chat import user, system
-from googletrans import Translator
+
+try:
+    from googletrans import Translator
+except Exception as e:
+    print(f"[WARN] googletrans import failed; translation fallback disabled: {e}")
+    Translator = None
 
 TMDB_API_KEY = os.getenv("TMDB_API")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-translator = Translator()
+try:
+    translator = Translator() if Translator else None
+except Exception as e:
+    print(f"[WARN] googletrans init failed; translation fallback disabled: {e}")
+    translator = None
+
+MUSICBRAINZ_BASE_URL = "https://musicbrainz.org/ws/2"
+COVER_ART_ARCHIVE_BASE_URL = "https://coverartarchive.org"
+MUSICBRAINZ_USER_AGENT = (
+    "PieDiscordReviewBot/1.0 "
+    "(https://github.com/kdhpa/movie_review_discord_bot)"
+)
 
 
 async def is_korean(text):
@@ -22,6 +38,8 @@ async def translate_to_korean(text):
     """영어/일본어 이름을 한국어로 번역"""
     if not text or text == "N/A" or await is_korean(text):
         return text
+    if not translator:
+        return text
 
     try:
         result = await translator.translate(text, dest='ko')
@@ -34,6 +52,8 @@ async def translate_to_korean(text):
 async def translate_to_english(text):
     if not text or text == "N/A":
         return text
+    if not translator:
+        return text
 
     try:
         result = await translator.translate(text, dest='en')
@@ -44,6 +64,9 @@ async def translate_to_english(text):
         return text
 
 class ContentSearcher:
+    _musicbrainz_lock = asyncio.Lock()
+    _musicbrainz_last_request = 0.0
+
     @staticmethod
     async def _search_tmdb_direct(session, name):
         """TMDB에서 직접 검색 (내부용)"""
@@ -243,6 +266,286 @@ class ContentSearcher:
                 ]
         providers['link'] = kr_data.get('link')
         return providers if any(k in providers for k in ('flatrate', 'rent', 'buy')) else None
+
+    @staticmethod
+    def _musicbrainz_query_phrase(value):
+        value = (value or "").strip()
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    @staticmethod
+    def _musicbrainz_artist_credit(item):
+        credits = item.get('artist-credit') or []
+        names = []
+        for credit in credits:
+            if isinstance(credit, dict):
+                name = credit.get('name')
+                if not name and isinstance(credit.get('artist'), dict):
+                    name = credit['artist'].get('name')
+                if name:
+                    names.append(name)
+        return ", ".join(names) if names else "미상"
+
+    @staticmethod
+    def _first_year(date_text):
+        match = re.match(r'^(\d{4})', str(date_text or ""))
+        return match.group(1) if match else "N/A"
+
+    @staticmethod
+    def _musicbrainz_source_url(entity_type, musicbrainz_id):
+        if not musicbrainz_id:
+            return None
+        return f"https://musicbrainz.org/{entity_type}/{musicbrainz_id}"
+
+    @staticmethod
+    async def _musicbrainz_get(session, endpoint, params):
+        """MusicBrainz JSON API 호출. 정책에 맞춰 앱 단위 1초 1요청으로 제한."""
+        async with ContentSearcher._musicbrainz_lock:
+            loop = asyncio.get_running_loop()
+            elapsed = loop.time() - ContentSearcher._musicbrainz_last_request
+            if elapsed < 1.05:
+                await asyncio.sleep(1.05 - elapsed)
+
+            url = f"{MUSICBRAINZ_BASE_URL}/{endpoint}"
+            request_params = dict(params)
+            request_params['fmt'] = 'json'
+            headers = {'User-Agent': MUSICBRAINZ_USER_AGENT}
+
+            try:
+                async with session.get(url, params=request_params, headers=headers) as response:
+                    ContentSearcher._musicbrainz_last_request = loop.time()
+                    if response.status == 200:
+                        return await response.json()
+                    if response.status in (429, 503):
+                        retry_after = response.headers.get('Retry-After')
+                        delay = int(retry_after) if retry_after and retry_after.isdigit() else 2
+                        print(f"[WARN] MusicBrainz rate/temporary error {response.status}; retry after {delay}s")
+                        await asyncio.sleep(delay)
+                    else:
+                        print(f"[WARN] MusicBrainz API error: status {response.status}")
+                        return None
+
+                async with session.get(url, params=request_params, headers=headers) as retry_response:
+                    ContentSearcher._musicbrainz_last_request = loop.time()
+                    if retry_response.status == 200:
+                        return await retry_response.json()
+                    print(f"[WARN] MusicBrainz retry failed: status {retry_response.status}")
+                    return None
+            except Exception as e:
+                ContentSearcher._musicbrainz_last_request = loop.time()
+                print(f"[ERROR] MusicBrainz API request failed: {e}")
+                return None
+
+    @staticmethod
+    async def fetch_music_cover_art(session, release_group_id=None, release_id=None):
+        """Cover Art Archive에서 대표 커버 URL을 가져온다."""
+        candidates = []
+        if release_group_id:
+            candidates.append(f"{COVER_ART_ARCHIVE_BASE_URL}/release-group/{release_group_id}")
+        if release_id:
+            candidates.append(f"{COVER_ART_ARCHIVE_BASE_URL}/release/{release_id}")
+
+        headers = {'User-Agent': MUSICBRAINZ_USER_AGENT}
+        for url in candidates:
+            try:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 404:
+                        continue
+                    if response.status != 200:
+                        print(f"[WARN] Cover Art Archive error: status {response.status}")
+                        continue
+
+                    data = await response.json()
+                    images = data.get('images') or []
+                    front_images = [image for image in images if image.get('front')]
+                    for image in front_images + images:
+                        thumbnails = image.get('thumbnails') or {}
+                        img_url = (
+                            thumbnails.get('500')
+                            or thumbnails.get('large')
+                            or thumbnails.get('small')
+                            or image.get('image')
+                        )
+                        if img_url:
+                            return img_url
+            except Exception as e:
+                print(f"[WARN] Cover Art Archive request failed: {e}")
+        return None
+
+    @staticmethod
+    def _music_album_result(item):
+        musicbrainz_id = item.get('id')
+        title = item.get('title') or "N/A"
+        artist = ContentSearcher._musicbrainz_artist_credit(item)
+        year = ContentSearcher._first_year(item.get('first-release-date'))
+        primary_type = item.get('primary-type') or "Release Group"
+
+        return {
+            'title': title,
+            'year': year,
+            'director': artist,
+            'img_url': None,
+            'category': 'music_album',
+            'musicbrainz_id': musicbrainz_id,
+            'musicbrainz_type': 'release-group',
+            'music_primary_type': primary_type,
+            'source_url': ContentSearcher._musicbrainz_source_url('release-group', musicbrainz_id),
+        }
+
+    @staticmethod
+    def _music_track_result(item):
+        musicbrainz_id = item.get('id')
+        title = item.get('title') or "N/A"
+        artist = ContentSearcher._musicbrainz_artist_credit(item)
+        releases = item.get('releases') or []
+        release = releases[0] if releases else {}
+        release_group = release.get('release-group') or {}
+        release_group_id = release_group.get('id')
+        release_id = release.get('id')
+        year = (
+            ContentSearcher._first_year(item.get('first-release-date'))
+            if item.get('first-release-date')
+            else ContentSearcher._first_year(release.get('date'))
+        )
+
+        return {
+            'title': title,
+            'year': year,
+            'director': artist,
+            'img_url': None,
+            'category': 'music_track',
+            'musicbrainz_id': musicbrainz_id,
+            'musicbrainz_type': 'recording',
+            'release_id': release_id,
+            'release_group_id': release_group_id,
+            'release_title': release.get('title'),
+            'source_url': ContentSearcher._musicbrainz_source_url('recording', musicbrainz_id),
+        }
+
+    @staticmethod
+    def _music_album_sort_key(item):
+        primary_type = (item.get('primary-type') or '').lower()
+        type_rank = {'album': 0, 'ep': 1, 'single': 2}
+        score = item.get('score')
+        try:
+            score_value = -int(score)
+        except (TypeError, ValueError):
+            score_value = 0
+        return (type_rank.get(primary_type, 3), score_value)
+
+    @staticmethod
+    async def _search_musicbrainz(session, endpoint, queries, result_key, result_builder, sort_key=None):
+        seen = set()
+        for query in queries:
+            data = await ContentSearcher._musicbrainz_get(
+                session,
+                endpoint,
+                {'query': query, 'limit': 8}
+            )
+            if not data:
+                continue
+
+            items = data.get(result_key) or []
+            if sort_key:
+                items = sorted(items, key=sort_key)
+
+            results = []
+            for item in items:
+                item_id = item.get('id')
+                if not item_id or item_id in seen:
+                    continue
+                seen.add(item_id)
+                results.append(result_builder(item))
+                if len(results) >= 5:
+                    break
+            if results:
+                return results
+        return []
+
+    @staticmethod
+    async def search_music_album_multiple(session, name, artist=None):
+        """MusicBrainz에서 앨범/EP/싱글 release-group 후보를 검색한다."""
+        title_query = ContentSearcher._musicbrainz_query_phrase(name)
+        queries = []
+        if artist:
+            artist_query = ContentSearcher._musicbrainz_query_phrase(artist)
+            queries.append(f"releasegroup:{title_query} AND artist:{artist_query}")
+        queries.append(f"releasegroup:{title_query}")
+
+        translated = await translate_to_english(name)
+        if translated and translated != name:
+            translated_query = ContentSearcher._musicbrainz_query_phrase(translated)
+            if artist:
+                queries.append(f"releasegroup:{translated_query} AND artist:{artist_query}")
+            queries.append(f"releasegroup:{translated_query}")
+
+        return await ContentSearcher._search_musicbrainz(
+            session,
+            'release-group',
+            queries,
+            'release-groups',
+            ContentSearcher._music_album_result,
+            ContentSearcher._music_album_sort_key
+        )
+
+    @staticmethod
+    async def search_music_track_multiple(session, name, artist=None):
+        """MusicBrainz에서 곡(recording) 후보를 검색한다."""
+        title_query = ContentSearcher._musicbrainz_query_phrase(name)
+        queries = []
+        if artist:
+            artist_query = ContentSearcher._musicbrainz_query_phrase(artist)
+            queries.append(f"recording:{title_query} AND artist:{artist_query}")
+        queries.append(f"recording:{title_query}")
+
+        translated = await translate_to_english(name)
+        if translated and translated != name:
+            translated_query = ContentSearcher._musicbrainz_query_phrase(translated)
+            if artist:
+                queries.append(f"recording:{translated_query} AND artist:{artist_query}")
+            queries.append(f"recording:{translated_query}")
+
+        return await ContentSearcher._search_musicbrainz(
+            session,
+            'recording',
+            queries,
+            'recordings',
+            ContentSearcher._music_track_result
+        )
+
+    @staticmethod
+    async def hydrate_music_result(session, music):
+        """선택된 음악 결과에 커버 이미지를 best-effort로 추가한다."""
+        if music.get('img_url'):
+            return music
+
+        if music.get('musicbrainz_type') == 'release-group':
+            music['img_url'] = await ContentSearcher.fetch_music_cover_art(
+                session,
+                release_group_id=music.get('musicbrainz_id')
+            )
+        elif music.get('musicbrainz_type') == 'recording':
+            if not music.get('release_id') and music.get('musicbrainz_id'):
+                data = await ContentSearcher._musicbrainz_get(
+                    session,
+                    f"recording/{music['musicbrainz_id']}",
+                    {'inc': 'releases+release-groups'}
+                )
+                releases = (data or {}).get('releases') or []
+                if releases:
+                    release = releases[0]
+                    release_group = release.get('release-group') or {}
+                    music['release_id'] = release.get('id')
+                    music['release_group_id'] = release_group.get('id')
+                    music['release_title'] = release.get('title')
+                    if music.get('year') == "N/A":
+                        music['year'] = ContentSearcher._first_year(release.get('date'))
+
+            music['img_url'] = await ContentSearcher.fetch_music_cover_art(
+                session,
+                release_group_id=music.get('release_group_id'),
+                release_id=music.get('release_id')
+            )
+        return music
 
     @staticmethod
     def _extract_mangadex_id(url_or_name):
@@ -508,13 +811,13 @@ class GrokSearcher:
 
         chat.append(system("""You are a parser that extracts review information from unstructured text messages.
 Extract the following fields and return ONLY valid JSON (no markdown, no explanation):
-- title: The title of the content being reviewed (movie, drama, anime, manga, webtoon, webnovel)
+- title: The title of the content being reviewed (movie, drama, anime, manga, webtoon, webnovel, album, track)
 - score: Rating score (convert to 0-5 scale, e.g. "8/10" → 4.0, "A+" → 5.0, "별 4개" → 4.0)
 - one_line_review: The main review comment or opinion
-- category: One of "movie", "drama", "anime", "manga", "webtoon", "webnovel" (guess based on context)
+- category: One of "movie", "drama", "anime", "manga", "webtoon", "webnovel", "music_album", "music_track" (guess based on context)
 - season: Season/part number if mentioned (e.g. "2기", "시즌3", "1부"; otherwise null)
 - year: Release year if mentioned (otherwise null)
-- director: Director or author name if mentioned (otherwise null)
+- director: Director, author, or artist name if mentioned (otherwise null)
 
 If you cannot extract meaningful review information, return {"error": "not_a_review"}"""))
 

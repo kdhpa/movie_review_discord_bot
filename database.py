@@ -178,15 +178,55 @@ class Database:
                     tmdb_id INTEGER,
                     mangadex_id TEXT,
                     naver_title_id TEXT,
+                    musicbrainz_id TEXT,
+                    musicbrainz_type TEXT,
                     created_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(title, category)
                 )
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE contents ADD COLUMN musicbrainz_id TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE contents ADD COLUMN musicbrainz_type TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                ALTER TABLE contents DROP CONSTRAINT IF EXISTS contents_title_category_key
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_title_category_unique
+                ON contents(title, category)
+                WHERE category NOT IN ('music_album', 'music_track')
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_music_mbid_unique
+                ON contents(musicbrainz_id, category)
+                WHERE musicbrainz_id IS NOT NULL
+                  AND category IN ('music_album', 'music_track')
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_music_title_creator_unique
+                ON contents(title, category, COALESCE(creator, ''))
+                WHERE musicbrainz_id IS NULL
+                  AND category IN ('music_album', 'music_track')
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_contents_category ON contents(category)
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_contents_tmdb ON contents(tmdb_id)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_contents_musicbrainz
+                ON contents(musicbrainz_id)
             ''')
 
             # reviews 테이블에 content_id, unit 컬럼 추가
@@ -276,20 +316,62 @@ class Database:
 
     def get_or_create_content(self, title, category, year_or_platform=None,
                               creator=None, img_url=None,
-                              tmdb_id=None, mangadex_id=None, naver_title_id=None):
+                              tmdb_id=None, mangadex_id=None, naver_title_id=None,
+                              musicbrainz_id=None, musicbrainz_type=None):
         """작품 조회 또는 생성 (UPSERT)"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
-                    # 1. 기존 작품 조회 (title + category로 UNIQUE)
-                    cursor.execute('''
-                        SELECT id FROM contents
-                        WHERE title = %s AND category = %s
-                    ''', (title, category))
+                    is_music = category in ('music_album', 'music_track')
 
-                    existing = cursor.fetchone()
+                    if is_music and musicbrainz_id:
+                        cursor.execute('''
+                            SELECT id FROM contents
+                            WHERE musicbrainz_id = %s AND category = %s
+                        ''', (musicbrainz_id, category))
+                        existing = cursor.fetchone()
+                        if not existing:
+                            cursor.execute('''
+                                SELECT id FROM contents
+                                WHERE title = %s
+                                  AND category = %s
+                                  AND COALESCE(creator, '') = COALESCE(%s, '')
+                            ''', (title, category, creator))
+                            existing = cursor.fetchone()
+                    elif is_music:
+                        cursor.execute('''
+                            SELECT id FROM contents
+                            WHERE title = %s
+                              AND category = %s
+                              AND COALESCE(creator, '') = COALESCE(%s, '')
+                        ''', (title, category, creator))
+                        existing = cursor.fetchone()
+                    else:
+                        # 1. 기존 작품 조회 (title + category로 UNIQUE)
+                        cursor.execute('''
+                            SELECT id FROM contents
+                            WHERE title = %s AND category = %s
+                        ''', (title, category))
+                        existing = cursor.fetchone()
 
                     if existing:
+                        cursor.execute('''
+                            UPDATE contents
+                            SET year_or_platform = COALESCE(year_or_platform, %s),
+                                creator = COALESCE(creator, %s),
+                                img_url = COALESCE(img_url, %s),
+                                tmdb_id = COALESCE(tmdb_id, %s),
+                                mangadex_id = COALESCE(mangadex_id, %s),
+                                naver_title_id = COALESCE(naver_title_id, %s),
+                                musicbrainz_id = COALESCE(musicbrainz_id, %s),
+                                musicbrainz_type = COALESCE(musicbrainz_type, %s)
+                            WHERE id = %s
+                        ''', (
+                            year_or_platform, creator, img_url, tmdb_id,
+                            mangadex_id, naver_title_id, musicbrainz_id,
+                            musicbrainz_type, existing[0]
+                        ))
+                        conn.commit()
                         # 기존 작품이 있으면 ID 반환
                         return existing[0]
                     else:
@@ -297,11 +379,13 @@ class Database:
                         cursor.execute('''
                             INSERT INTO contents
                             (title, category, year_or_platform, creator, img_url,
-                             tmdb_id, mangadex_id, naver_title_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             tmdb_id, mangadex_id, naver_title_id,
+                             musicbrainz_id, musicbrainz_type)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING id
                         ''', (title, category, year_or_platform, creator, img_url,
-                              tmdb_id, mangadex_id, naver_title_id))
+                              tmdb_id, mangadex_id, naver_title_id,
+                              musicbrainz_id, musicbrainz_type))
 
                         conn.commit()
                         return cursor.fetchone()[0]
