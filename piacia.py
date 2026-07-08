@@ -3,6 +3,7 @@ import aiohttp
 import asyncio
 import re
 import html as html_lib
+import time
 from urllib.parse import parse_qs, urlparse, urljoin
 from discord.ext import commands
 from review_form import (
@@ -66,6 +67,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 Token = os.getenv("Token")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+SPOTIFY_ACCESS_TOKEN = None
+SPOTIFY_TOKEN_EXPIRES_AT = 0
 
 
 # CATEGORY_EMOJI 역매핑 (emoji -> category)
@@ -267,6 +273,22 @@ def parse_spotify_type_from_embed(html):
     return None, None
 
 
+def parse_youtube_video_id(url):
+    parsed = urlparse(url)
+    host = normalize_host(url)
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+        return video_id or None
+    query = parse_qs(parsed.query)
+    return query.get("v", [None])[0]
+
+
+def parse_youtube_playlist_id(url):
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    return query.get("list", [None])[0]
+
+
 def parse_youtube_music_type(url):
     parsed = urlparse(url)
     host = normalize_host(url)
@@ -336,6 +358,14 @@ def first_year_from_text(value):
     return match.group(0) if match else None
 
 
+def best_youtube_thumbnail(thumbnails):
+    thumbnails = thumbnails or {}
+    for key in ("maxres", "standard", "high", "medium", "default"):
+        if key in thumbnails and thumbnails[key].get("url"):
+            return thumbnails[key]["url"]
+    return None
+
+
 def clean_youtube_artist(author_name):
     artist = (author_name or "").strip()
     artist = re.sub(r'\s*-\s*Topic$', '', artist, flags=re.IGNORECASE).strip()
@@ -378,8 +408,203 @@ async def fetch_page_meta(session, source_url):
         return {}
 
 
+async def get_spotify_access_token(session):
+    global SPOTIFY_ACCESS_TOKEN, SPOTIFY_TOKEN_EXPIRES_AT
+
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return None
+
+    now = time.time()
+    if SPOTIFY_ACCESS_TOKEN and now < SPOTIFY_TOKEN_EXPIRES_AT - 60:
+        return SPOTIFY_ACCESS_TOKEN
+
+    try:
+        async with session.post(
+            "https://accounts.spotify.com/api/token",
+            data={"grant_type": "client_credentials"},
+            auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] Spotify token API status={response.status}")
+                return None
+
+            data = await response.json()
+            SPOTIFY_ACCESS_TOKEN = data.get("access_token")
+            SPOTIFY_TOKEN_EXPIRES_AT = now + int(data.get("expires_in", 3600))
+            return SPOTIFY_ACCESS_TOKEN
+    except Exception as e:
+        print(f"[WARN] Spotify token API failed: {e}")
+        return None
+
+
+def spotify_api_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "PieDiscordReviewBot/1.0",
+    }
+
+
+async def fetch_spotify_oembed(session, source_url):
+    try:
+        async with session.get(
+            "https://open.spotify.com/oembed",
+            params={"url": source_url},
+            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+        ) as response:
+            if response.status == 200:
+                return await response.json()
+            print(f"[WARN] Spotify oEmbed status={response.status}")
+    except Exception as e:
+        print(f"[WARN] Spotify oEmbed failed: {e}")
+    return {}
+
+
+async def fetch_spotify_music_by_api(session, spotify_type, spotify_id, source_url):
+    if spotify_type not in ("track", "album") or not spotify_id:
+        return None
+
+    token = await get_spotify_access_token(session)
+    if not token:
+        return None
+
+    endpoint = "tracks" if spotify_type == "track" else "albums"
+    try:
+        async with session.get(
+            f"https://api.spotify.com/v1/{endpoint}/{spotify_id}",
+            headers=spotify_api_headers(token),
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] Spotify {endpoint} API status={response.status}")
+                return None
+            data = await response.json()
+    except Exception as e:
+        print(f"[WARN] Spotify {endpoint} API failed: {e}")
+        return None
+
+    if spotify_type == "track":
+        album = data.get("album") or {}
+        images = album.get("images") or []
+        return {
+            "title": data.get("name"),
+            "year": first_year_from_text(album.get("release_date")) or "N/A",
+            "director": ", ".join(artist.get("name") for artist in data.get("artists", []) if artist.get("name")) or "미상",
+            "img_url": images[0].get("url") if images else None,
+            "category": "music_track",
+            "source_url": source_url,
+            "provider_id": spotify_id,
+            "provider": "spotify_api",
+        }
+
+    images = data.get("images") or []
+    return {
+        "title": data.get("name"),
+        "year": first_year_from_text(data.get("release_date")) or "N/A",
+        "director": ", ".join(artist.get("name") for artist in data.get("artists", []) if artist.get("name")) or "미상",
+        "img_url": images[0].get("url") if images else None,
+        "category": "music_album",
+        "source_url": source_url,
+        "provider_id": spotify_id,
+        "provider": "spotify_api",
+    }
+
+
+async def fetch_youtube_music_by_api(session, source_url, fallback_category):
+    if not YOUTUBE_API_KEY:
+        return None
+
+    category = parse_youtube_music_type(source_url) or (
+        fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
+    )
+    video_id = parse_youtube_video_id(source_url)
+    playlist_id = parse_youtube_playlist_id(source_url)
+
+    if category == "music_album" and playlist_id:
+        try:
+            async with session.get(
+                "https://www.googleapis.com/youtube/v3/playlists",
+                params={
+                    "part": "snippet",
+                    "id": playlist_id,
+                    "key": YOUTUBE_API_KEY,
+                },
+            ) as response:
+                if response.status != 200:
+                    print(f"[WARN] YouTube playlists API status={response.status}")
+                    return None
+                data = await response.json()
+        except Exception as e:
+            print(f"[WARN] YouTube playlists API failed: {e}")
+            return None
+
+        items = data.get("items") or []
+        if not items:
+            return None
+        snippet = items[0].get("snippet") or {}
+        return {
+            "title": snippet.get("title"),
+            "year": first_year_from_text(snippet.get("publishedAt")) or "N/A",
+            "director": clean_youtube_artist(snippet.get("channelTitle")),
+            "img_url": best_youtube_thumbnail(snippet.get("thumbnails")),
+            "category": "music_album",
+            "source_url": source_url,
+            "provider_id": playlist_id,
+            "provider": "youtube_data_api",
+        }
+
+    if not video_id:
+        return None
+
+    try:
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={
+                "part": "snippet",
+                "id": video_id,
+                "key": YOUTUBE_API_KEY,
+            },
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] YouTube videos API status={response.status}")
+                return None
+            data = await response.json()
+    except Exception as e:
+        print(f"[WARN] YouTube videos API failed: {e}")
+        return None
+
+    items = data.get("items") or []
+    if not items:
+        return None
+
+    snippet = items[0].get("snippet") or {}
+    title, artist = parse_youtube_title_artist(
+        snippet.get("title"),
+        snippet.get("channelTitle")
+    )
+    return {
+        "title": title,
+        "year": first_year_from_text(snippet.get("publishedAt")) or "N/A",
+        "director": artist or "미상",
+        "img_url": best_youtube_thumbnail(snippet.get("thumbnails")),
+        "category": "music_track",
+        "source_url": source_url,
+        "provider_id": video_id,
+        "provider": "youtube_data_api",
+    }
+
+
 async def fetch_spotify_music_by_url(session, source_url, fallback_category):
     spotify_type, spotify_id = parse_spotify_type_from_url(source_url)
+    oembed_data = {}
+
+    if not spotify_type or not spotify_id:
+        oembed_data = await fetch_spotify_oembed(session, source_url)
+        spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
+
+    api_result = await fetch_spotify_music_by_api(session, spotify_type, spotify_id, source_url)
+    if api_result and api_result.get("title"):
+        return api_result
+
     if spotify_type == "album":
         category = "music_album"
     elif spotify_type == "track":
@@ -409,20 +634,9 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
         or first_year_from_text(page_meta.get("description"))
     )
 
-    oembed_data = {}
     if not title or not img_url or not spotify_type:
-        try:
-            async with session.get(
-                "https://open.spotify.com/oembed",
-                params={"url": source_url},
-                headers={"User-Agent": "PieDiscordReviewBot/1.0"},
-            ) as response:
-                if response.status == 200:
-                    oembed_data = await response.json()
-                else:
-                    print(f"[WARN] Spotify oEmbed status={response.status}")
-        except Exception as e:
-            print(f"[WARN] Spotify oEmbed failed: {e}")
+        if not oembed_data:
+            oembed_data = await fetch_spotify_oembed(session, source_url)
 
         if not spotify_type:
             spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
@@ -455,6 +669,10 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
 
 
 async def fetch_youtube_music_by_url(session, source_url, fallback_category):
+    api_result = await fetch_youtube_music_by_api(session, source_url, fallback_category)
+    if api_result and api_result.get("title"):
+        return api_result
+
     parsed = urlparse(source_url)
     query = parse_qs(parsed.query)
     oembed_url = source_url
