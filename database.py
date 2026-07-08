@@ -180,6 +180,8 @@ class Database:
                     naver_title_id TEXT,
                     musicbrainz_id TEXT,
                     musicbrainz_type TEXT,
+                    igdb_id INTEGER,
+                    steam_appid INTEGER,
                     created_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(title, category)
                 )
@@ -199,12 +201,29 @@ class Database:
                 END $$;
             ''')
             cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE contents ADD COLUMN igdb_id INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
+                DO $$
+                BEGIN
+                    ALTER TABLE contents ADD COLUMN steam_appid INTEGER;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            ''')
+            cursor.execute('''
                 ALTER TABLE contents DROP CONSTRAINT IF EXISTS contents_title_category_key
+            ''')
+            cursor.execute('''
+                DROP INDEX IF EXISTS idx_contents_title_category_unique
             ''')
             cursor.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_title_category_unique
                 ON contents(title, category)
-                WHERE category NOT IN ('music_album', 'music_track')
+                WHERE category NOT IN ('music_album', 'music_track', 'game')
             ''')
             cursor.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_music_mbid_unique
@@ -227,6 +246,23 @@ class Database:
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_contents_musicbrainz
                 ON contents(musicbrainz_id)
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_game_igdb_unique
+                ON contents(igdb_id, category)
+                WHERE igdb_id IS NOT NULL AND category = 'game'
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_game_steam_unique
+                ON contents(steam_appid, category)
+                WHERE steam_appid IS NOT NULL AND category = 'game'
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_game_title_creator_unique
+                ON contents(title, category, COALESCE(creator, ''))
+                WHERE igdb_id IS NULL
+                  AND steam_appid IS NULL
+                  AND category = 'game'
             ''')
 
             # reviews 테이블에 content_id, unit 컬럼 추가
@@ -317,7 +353,8 @@ class Database:
     def get_or_create_content(self, title, category, year_or_platform=None,
                               creator=None, img_url=None,
                               tmdb_id=None, mangadex_id=None, naver_title_id=None,
-                              musicbrainz_id=None, musicbrainz_type=None):
+                              musicbrainz_id=None, musicbrainz_type=None,
+                              igdb_id=None, steam_appid=None):
         """작품 조회 또는 생성 (UPSERT)"""
         try:
             with get_conn() as conn:
@@ -346,6 +383,28 @@ class Database:
                               AND COALESCE(creator, '') = COALESCE(%s, '')
                         ''', (title, category, creator))
                         existing = cursor.fetchone()
+                    elif category == 'game':
+                        existing = None
+                        if igdb_id:
+                            cursor.execute('''
+                                SELECT id FROM contents
+                                WHERE igdb_id = %s AND category = %s
+                            ''', (igdb_id, category))
+                            existing = cursor.fetchone()
+                        if not existing and steam_appid:
+                            cursor.execute('''
+                                SELECT id FROM contents
+                                WHERE steam_appid = %s AND category = %s
+                            ''', (steam_appid, category))
+                            existing = cursor.fetchone()
+                        if not existing:
+                            cursor.execute('''
+                                SELECT id FROM contents
+                                WHERE title = %s
+                                  AND category = %s
+                                  AND COALESCE(creator, '') = COALESCE(%s, '')
+                            ''', (title, category, creator))
+                            existing = cursor.fetchone()
                     else:
                         # 1. 기존 작품 조회 (title + category로 UNIQUE)
                         cursor.execute('''
@@ -364,12 +423,14 @@ class Database:
                                 mangadex_id = COALESCE(mangadex_id, %s),
                                 naver_title_id = COALESCE(naver_title_id, %s),
                                 musicbrainz_id = COALESCE(musicbrainz_id, %s),
-                                musicbrainz_type = COALESCE(musicbrainz_type, %s)
+                                musicbrainz_type = COALESCE(musicbrainz_type, %s),
+                                igdb_id = COALESCE(igdb_id, %s),
+                                steam_appid = COALESCE(steam_appid, %s)
                             WHERE id = %s
                         ''', (
                             year_or_platform, creator, img_url, tmdb_id,
                             mangadex_id, naver_title_id, musicbrainz_id,
-                            musicbrainz_type, existing[0]
+                            musicbrainz_type, igdb_id, steam_appid, existing[0]
                         ))
                         conn.commit()
                         # 기존 작품이 있으면 ID 반환
@@ -380,12 +441,12 @@ class Database:
                             INSERT INTO contents
                             (title, category, year_or_platform, creator, img_url,
                              tmdb_id, mangadex_id, naver_title_id,
-                             musicbrainz_id, musicbrainz_type)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             musicbrainz_id, musicbrainz_type, igdb_id, steam_appid)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING id
                         ''', (title, category, year_or_platform, creator, img_url,
                               tmdb_id, mangadex_id, naver_title_id,
-                              musicbrainz_id, musicbrainz_type))
+                              musicbrainz_id, musicbrainz_type, igdb_id, steam_appid))
 
                         conn.commit()
                         return cursor.fetchone()[0]

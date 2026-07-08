@@ -13,13 +13,15 @@ from review_form import (
     WEBNOVEL_FORM,
     MUSIC_ALBUM_FORM,
     MUSIC_TRACK_FORM,
+    GAME_FORM,
     format_season,
 )
 
 # 카테고리별 이모지 및 이름 매핑
-CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱", "webnovel": "📖", "music_album": "💿", "music_track": "🎵"}
-CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰", "webnovel": "웹소설", "music_album": "앨범", "music_track": "곡"}
+CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱", "webnovel": "📖", "music_album": "💿", "music_track": "🎵", "game": "🎮"}
+CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰", "webnovel": "웹소설", "music_album": "앨범", "music_track": "곡", "game": "게임"}
 MUSIC_CATEGORIES = {"music_album", "music_track"}
+GAME_CATEGORIES = {"game"}
 PROGRESS_UNIT_LABELS = {"manga": "권", "webtoon": "화", "webnovel": "화"}
 WEBNOVEL_PLATFORM_ALIASES = {
     "문피아": "문피아",
@@ -56,6 +58,9 @@ MUSIC_LINK_DOMAINS = {
     "www.youtube.com",
     "youtu.be",
 }
+GAME_LINK_DOMAINS = {
+    "store.steampowered.com",
+}
 from database import Database
 from api_searcher import ContentSearcher, GrokSearcher
 from assistant_service import AssistantService
@@ -70,8 +75,12 @@ Token = os.getenv("Token")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+IGDB_CLIENT_ID = os.getenv("IGDB_CLIENT_ID")
+IGDB_CLIENT_SECRET = os.getenv("IGDB_CLIENT_SECRET")
 SPOTIFY_ACCESS_TOKEN = None
 SPOTIFY_TOKEN_EXPIRES_AT = 0
+IGDB_ACCESS_TOKEN = None
+IGDB_TOKEN_EXPIRES_AT = 0
 
 
 # CATEGORY_EMOJI 역매핑 (emoji -> category)
@@ -121,13 +130,13 @@ def parse_review_detail(content):
         return None, None
 
     director = None
-    for prefix in ['🎥감독: ', '✍️작가: ', '🎤아티스트: ']:
+    for prefix in ['🎥감독: ', '✍️작가: ', '🎤아티스트: ', '🏢개발사: ']:
         if lines[1].startswith(prefix):
             director = lines[1][len(prefix):].strip()
             break
 
     year = None
-    for prefix in ['📅개봉년도: ', '📅연재년도: ', '📍플랫폼: ', '📅발매년도: ']:
+    for prefix in ['📅개봉년도: ', '📅연재년도: ', '📍플랫폼: ', '📅발매년도: ', '📅출시년도: ']:
         if lines[2].startswith(prefix):
             year = lines[2][len(prefix):].strip()
             break
@@ -260,6 +269,23 @@ def should_handle_as_music_link(url, category):
     if host == "spotify.link" or host.endswith("spotify.com") or host == "music.youtube.com":
         return True
     return category in MUSIC_CATEGORIES
+
+
+def parse_steam_appid(url):
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    for idx, part in enumerate(parts):
+        if part == "app" and idx + 1 < len(parts) and parts[idx + 1].isdigit():
+            return int(parts[idx + 1])
+    return None
+
+
+def is_game_link(url):
+    source_url = normalize_source_url(url)
+    if not source_url:
+        return False
+    host = normalize_host(source_url)
+    return host in GAME_LINK_DOMAINS and bool(parse_steam_appid(source_url))
 
 
 def parse_spotify_type_from_url(url):
@@ -880,6 +906,190 @@ async def fetch_music_by_url(session, source_url, fallback_category):
     return None
 
 
+def year_from_unix_timestamp(value):
+    try:
+        return str(time.gmtime(int(value)).tm_year)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def igdb_image_url(image_id, size="cover_big"):
+    if not image_id:
+        return None
+    return f"https://images.igdb.com/igdb/image/upload/t_{size}/{image_id}.jpg"
+
+
+def igdb_query_phrase(value):
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def normalize_game_search_text(value):
+    return re.sub(r'\s+', ' ', re.sub(r'[^0-9a-zA-Z가-힣]+', ' ', str(value or "").lower())).strip()
+
+
+def igdb_game_result(item):
+    involved_companies = item.get("involved_companies") or []
+    developer_names = []
+    fallback_company_names = []
+    for involved in involved_companies:
+        company = involved.get("company") if isinstance(involved, dict) else None
+        company_name = company.get("name") if isinstance(company, dict) else None
+        if company_name:
+            fallback_company_names.append(company_name)
+            if involved.get("developer"):
+                developer_names.append(company_name)
+
+    cover = item.get("cover") or {}
+    slug = item.get("slug")
+    igdb_id = item.get("id")
+    return {
+        "title": item.get("name") or "N/A",
+        "year": year_from_unix_timestamp(item.get("first_release_date")) or "N/A",
+        "director": ", ".join(developer_names or fallback_company_names) or "미상",
+        "img_url": igdb_image_url(cover.get("image_id")),
+        "category": "game",
+        "igdb_id": igdb_id,
+        "source_url": f"https://www.igdb.com/games/{slug}" if slug else None,
+    }
+
+
+async def get_igdb_access_token(session):
+    global IGDB_ACCESS_TOKEN, IGDB_TOKEN_EXPIRES_AT
+
+    if not IGDB_CLIENT_ID or not IGDB_CLIENT_SECRET:
+        return None
+
+    now = time.time()
+    if IGDB_ACCESS_TOKEN and now < IGDB_TOKEN_EXPIRES_AT - 60:
+        return IGDB_ACCESS_TOKEN
+
+    try:
+        async with session.post(
+            "https://id.twitch.tv/oauth2/token",
+            params={
+                "client_id": IGDB_CLIENT_ID,
+                "client_secret": IGDB_CLIENT_SECRET,
+                "grant_type": "client_credentials",
+            },
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] IGDB token API status={response.status}")
+                return None
+            data = await response.json()
+            IGDB_ACCESS_TOKEN = data.get("access_token")
+            IGDB_TOKEN_EXPIRES_AT = now + int(data.get("expires_in", 3600))
+            return IGDB_ACCESS_TOKEN
+    except Exception as e:
+        print(f"[WARN] IGDB token API failed: {e}")
+        return None
+
+
+async def search_igdb_games(session, title, limit=5):
+    token = await get_igdb_access_token(session)
+    if not token or not title:
+        return []
+
+    body = (
+        f'search "{igdb_query_phrase(title)}"; '
+        "fields name,slug,first_release_date,cover.image_id,"
+        "involved_companies.developer,involved_companies.company.name,platforms.name; "
+        f"limit {limit};"
+    )
+    try:
+        async with session.post(
+            "https://api.igdb.com/v4/games",
+            headers={
+                "Client-ID": IGDB_CLIENT_ID,
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "text/plain",
+            },
+            data=body,
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] IGDB games API status={response.status}")
+                return []
+            data = await response.json()
+    except Exception as e:
+        print(f"[WARN] IGDB games API failed: {e}")
+        return []
+
+    results = [igdb_game_result(item) for item in data if item.get("name")]
+    normalized_query = normalize_game_search_text(title)
+    return sorted(
+        results,
+        key=lambda game: (
+            normalize_game_search_text(game.get("title")) != normalized_query,
+            not normalize_game_search_text(game.get("title")).startswith(normalized_query),
+            game.get("year") == "N/A",
+        )
+    )
+
+
+async def enrich_game_info_from_igdb(session, game_info):
+    if not game_info or not game_info.get("title") or game_info.get("igdb_id"):
+        return game_info
+
+    results = await search_igdb_games(session, game_info["title"], limit=1)
+    if not results:
+        return game_info
+
+    enrichment = results[0]
+    if not game_info.get("year") or game_info.get("year") == "N/A":
+        game_info["year"] = enrichment.get("year") or "N/A"
+    if not game_info.get("director") or game_info.get("director") == "미상":
+        game_info["director"] = enrichment.get("director") or "미상"
+    if not game_info.get("img_url"):
+        game_info["img_url"] = enrichment.get("img_url")
+    game_info["igdb_id"] = enrichment.get("igdb_id")
+    return game_info
+
+
+async def fetch_steam_game_by_url(session, source_url):
+    steam_appid = parse_steam_appid(source_url)
+    if not steam_appid:
+        return None
+
+    try:
+        async with session.get(
+            "https://store.steampowered.com/api/appdetails",
+            params={"appids": steam_appid, "cc": "kr", "l": "koreana"},
+            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] Steam appdetails API status={response.status}")
+                return None
+            data = await response.json()
+    except Exception as e:
+        print(f"[WARN] Steam appdetails API failed: {e}")
+        return None
+
+    app_data = (data or {}).get(str(steam_appid)) or {}
+    if not app_data.get("success"):
+        return None
+
+    game = app_data.get("data") or {}
+    developers = game.get("developers") or []
+    release_date = game.get("release_date") or {}
+    game_info = {
+        "title": game.get("name"),
+        "year": first_year_from_text(release_date.get("date")) or "N/A",
+        "director": ", ".join(developers) if developers else "미상",
+        "img_url": game.get("header_image"),
+        "category": "game",
+        "source_url": source_url,
+        "steam_appid": steam_appid,
+        "provider": "steam_store",
+    }
+    return game_info
+
+
+async def fetch_game_by_url(session, source_url):
+    if is_game_link(source_url):
+        return await fetch_steam_game_by_url(session, source_url)
+    return None
+
+
 async def defer_ephemeral_interaction(interaction: discord.Interaction, context: str) -> bool:
     if interaction.response.is_done():
         return True
@@ -1255,7 +1465,9 @@ async def _save_and_send_review(
         mangadex_id=movie_info.get('mangadex_id'),
         naver_title_id=movie_info.get('naver_title_id'),
         musicbrainz_id=movie_info.get('musicbrainz_id'),
-        musicbrainz_type=movie_info.get('musicbrainz_type')
+        musicbrainz_type=movie_info.get('musicbrainz_type'),
+        igdb_id=movie_info.get('igdb_id'),
+        steam_appid=movie_info.get('steam_appid')
     )
 
     if not content_id:
@@ -1350,6 +1562,16 @@ async def _save_and_send_review(
             one_line_text=line_comment,
             author_name=display_name
         )
+    elif db_category == 'game':
+        filled_form = GAME_FORM.format(
+            title=title,
+            season_text=season_text,
+            developer=director,
+            year=year,
+            score=return_score_emoji(score_float),
+            one_line_text=line_comment,
+            author_name=display_name
+        )
     else:  # webnovel
         filled_form = WEBNOVEL_FORM.format(
             title=title,
@@ -1433,7 +1655,7 @@ class MovieSelectMenu(discord.ui.Select):
                 label=truncate_option_text(f"{movie['title']} ({movie.get('year') or 'N/A'})"),
                 description=truncate_option_text(
                     (movie.get('director') or CATEGORY_NAME[movie['category']])
-                    if movie.get('category') in MUSIC_CATEGORIES
+                    if movie.get('category') in MUSIC_CATEGORIES or movie.get('category') == 'game'
                     else CATEGORY_NAME[movie['category']]
                 ),
                 value=str(idx),
@@ -1473,7 +1695,7 @@ class MovieSelectMenu(discord.ui.Select):
                     session, movie['tmdb_id'], movie['media_type']
                 )
 
-        movie['season'] = None if movie['category'] in ('movie', 'music_album', 'music_track') else self.form.season
+        movie['season'] = None if movie['category'] in ('movie', 'music_album', 'music_track', 'game') else self.form.season
         movie['latest_units'] = self.form.latest_units
 
         # 리뷰 저장 및 전송 - form에서 직접 참조
@@ -1837,6 +2059,12 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 elif prefetched_db_category in MUSIC_CATEGORIES:
                     movie_info['musicbrainz_id'] = external_id
                     movie_info['musicbrainz_type'] = 'release-group' if prefetched_db_category == 'music_album' else 'recording'
+                elif prefetched_db_category == 'game':
+                    if isinstance(external_id, dict):
+                        movie_info['igdb_id'] = external_id.get('igdb_id')
+                        movie_info['steam_appid'] = external_id.get('steam_appid')
+                    else:
+                        movie_info['igdb_id'] = external_id
 
             await _save_and_send_review(
                 interaction,
@@ -2011,6 +2239,48 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 view = MovieSelectView(music_results, self)
                 await interaction.followup.send(
                     f"🔍 '{original_title}' 검색 결과 {len(music_results)}개입니다. 음악을 선택하세요:",
+                    view=view,
+                    ephemeral=True
+                )
+                return
+
+            elif self.category == 'game':
+                game_results = await search_igdb_games(session, title)
+
+                if not game_results:
+                    print(f"[DEBUG] ReviewForm.on_submit() 게임 검색 실패 - 결과 없음")
+                    await interaction.followup.send(
+                        f"❌ '{original_title}'를 찾을 수 없습니다. 영문 제목이나 Steam 링크로 다시 시도해주세요.",
+                        ephemeral=True
+                    )
+                    return
+
+                if len(game_results) == 1:
+                    print(f"[DEBUG] ReviewForm.on_submit() 게임 단일 결과 - 자동 선택")
+                    game = game_results[0]
+                    game['season'] = None
+                    game['latest_units'] = self.latest_units
+
+                    await _save_and_send_review(
+                        interaction,
+                        self.db,
+                        game,
+                        self.category,
+                        self.score,
+                        self.line_comment,
+                        self.comment,
+                        self.author_id,
+                        self.author_name,
+                        self.display_name,
+                        unit_to=unit_to,
+                        latest_units=self.latest_units
+                    )
+                    return
+
+                print(f"[DEBUG] ReviewForm.on_submit() 게임 다중 결과 - Select Menu 표시 ({len(game_results)}개)")
+                view = MovieSelectView(game_results, self)
+                await interaction.followup.send(
+                    f"🔍 '{original_title}' 검색 결과 {len(game_results)}개입니다. 게임을 선택하세요:",
                     view=view,
                     ephemeral=True
                 )
@@ -2259,6 +2529,8 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
             search_category = 'webtoon'
         elif category in MUSIC_CATEGORIES:
             search_category = category
+        elif category == 'game':
+            search_category = 'game'
         else:
             search_category = 'webnovel'
 
@@ -2310,6 +2582,16 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                 title=title,
                 season_text=season_text,
                 artist=director,
+                year=year,
+                score=return_score_emoji(score),
+                one_line_text=one_line_review,
+                author_name=self.display_name
+            )
+        elif search_category == 'game':
+            filled_form = GAME_FORM.format(
+                title=title,
+                season_text=season_text,
+                developer=director,
                 year=year,
                 score=return_score_emoji(score),
                 one_line_text=one_line_review,
@@ -2431,6 +2713,10 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                     if music_results:
                         music = await ContentSearcher.hydrate_music_result(session, music_results[0])
                         img_url = music.get('img_url')
+                elif search_category == 'game':
+                    game_results = await search_igdb_games(session, title, limit=1)
+                    if game_results:
+                        img_url = game_results[0].get('img_url')
 
             if img_url:
                 self.db.update_review(
@@ -2542,7 +2828,7 @@ bot = MyBot(command_prefix="/", intents=intents)
 @discord.app_commands.command(name="한줄평", description="리뷰를 작성합니다.")
 @discord.app_commands.describe(
     카테고리="리뷰할 콘텐츠 종류",
-    링크="선택: 링크로 자동 입력. 지원: MangaDex, 웹소설, Spotify 트랙/앨범, YouTube Music 곡",
+    링크="선택: 링크로 자동 입력. 지원: Steam, MangaDex, 웹소설, Spotify/YouTube Music",
     기수="시즌/기/부 번호 (선택)",
     최신화="현재 공개된 최신 화/권 수 (진행률 계산용, 선택)"
 )
@@ -2551,6 +2837,7 @@ bot = MyBot(command_prefix="/", intents=intents)
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="🎮 게임", value="game"),
     discord.app_commands.Choice(name="💿 앨범", value="music_album"),
     discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
@@ -2565,7 +2852,7 @@ async def review_command(
     if 링크 and not source_url:
         await send_ephemeral_interaction(
             interaction,
-            "❌ 링크 형식이 아닙니다. 예: `https://open.spotify.com/track/...` 또는 `https://music.youtube.com/watch?v=...`"
+            "❌ 링크 형식이 아닙니다. 예: `https://store.steampowered.com/app/...`, `https://open.spotify.com/track/...`"
         )
         return
 
@@ -2638,6 +2925,70 @@ async def review_command(
         )
         return
 
+    if source_url and (카테고리 == 'game' or is_game_link(source_url)):
+        if not is_game_link(source_url):
+            await send_ephemeral_interaction(
+                interaction,
+                "❌ 게임 링크는 Steam 상점의 `/app/게임ID` 링크만 지원합니다."
+            )
+            return
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=2.8)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                game_info = await fetch_game_by_url(session, source_url)
+        except Exception as e:
+            print(f"[WARN] review_command() 게임 링크 메타데이터 조회 실패: {e}")
+            game_info = None
+
+        if not game_info:
+            await send_ephemeral_interaction(
+                interaction,
+                "❌ 게임 정보를 가져오지 못했습니다. Steam 상점 링크인지 확인해주세요."
+            )
+            return
+
+        prefetched_info = (
+            game_info['title'],
+            game_info.get('year') or "N/A",
+            game_info.get('director') or "미상",
+            game_info.get('img_url'),
+            {
+                'igdb_id': game_info.get('igdb_id'),
+                'steam_appid': game_info.get('steam_appid')
+            }
+        )
+        print(
+            f"[DEBUG] review_command() 게임 링크 조회 성공 - "
+            f"provider={game_info.get('provider')}, title={game_info.get('title')}, "
+            f"developer={game_info.get('director')}, year={game_info.get('year')}",
+            flush=True
+        )
+        modal = ReviewForm(
+            bot.db,
+            'game',
+            interaction.user.id,
+            str(interaction.user),
+            interaction.user.display_name,
+            prefetched_info=prefetched_info,
+            prefetched_category='game',
+            source_url=source_url
+        )
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.HTTPException as e:
+            print(
+                f"[ERROR] review_command() 게임 링크 모달 전송 실패 "
+                f"(code={getattr(e, 'code', None)}, source_url={source_url})",
+                flush=True
+            )
+            if not interaction.response.is_done():
+                await send_ephemeral_interaction(
+                    interaction,
+                    "❌ 게임 정보를 가져왔지만 입력창을 여는 중 Discord 응답이 만료되었습니다. 다시 시도해주세요."
+                )
+        return
+
     if not await defer_ephemeral_interaction(interaction, "review_command()"):
         return
 
@@ -2700,6 +3051,7 @@ async def review_command(
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="게임", value="game"),
     discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
@@ -2734,6 +3086,8 @@ async def my_reviews_command(interaction: discord.Interaction, 카테고리: str
         value = f"⭐ {score_emoji} {review['score']} /5\n💬 \"{review['one_line_review']}\""
         if cat in MUSIC_CATEGORIES and review.get('director'):
             value = f"🎤 {review['director']}\n{value}"
+        if cat == 'game' and review.get('director'):
+            value = f"🏢 {review['director']}\n{value}"
         if review.get('unit_to') is not None:
             progress_text = format_progress_text(
                 cat,
@@ -2764,6 +3118,7 @@ async def my_reviews_command(interaction: discord.Interaction, 카테고리: str
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="게임", value="game"),
     discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
@@ -2800,6 +3155,7 @@ async def stats_command(interaction: discord.Interaction, 제목: str, 카테고
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="🎮 게임", value="game"),
     discord.app_commands.Choice(name="💿 앨범", value="music_album"),
     discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
@@ -2893,6 +3249,7 @@ async def review_history_command(
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="게임", value="game"),
     discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
@@ -2987,6 +3344,7 @@ async def delete_review_command(interaction: discord.Interaction, 제목: str, �
     discord.app_commands.Choice(name="만화", value="manga"),
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="게임", value="game"),
     discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
@@ -3107,6 +3465,7 @@ CATEGORY_TO_SEARCH = {
     'webnovel': 'webnovel',
     'music_album': 'music_album',
     'music_track': 'music_track',
+    'game': 'game',
 }
 
 
@@ -3357,6 +3716,7 @@ async def migration_command(interaction: discord.Interaction, 채널: discord.Te
     discord.app_commands.Choice(name="📚 만화", value="manga"),
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
+    discord.app_commands.Choice(name="🎮 게임", value="game"),
     discord.app_commands.Choice(name="💿 앨범", value="music_album"),
     discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])

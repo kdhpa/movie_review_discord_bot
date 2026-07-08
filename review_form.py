@@ -86,3 +86,15 @@ MUSIC_TRACK_FORM = (
     "\n"
     "작성자: {author_name} \n"
 )
+
+GAME_FORM = (
+    "🎮제목: {title}{season_text}\n"
+    "🏢개발사: {developer}\n"
+    "📅출시년도: {year}\n"
+    "\n"
+    "평점 : {score} \n"
+    "\n"
+    "\"{one_line_text}\"\n"
+    "\n"
+    "작성자: {author_name} \n"
+)

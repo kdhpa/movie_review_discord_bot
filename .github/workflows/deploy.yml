@@ -25,5 +25,7 @@ jobs:
               --env-file .env \
               -e SPOTIFY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}" \
               -e SPOTIFY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}" \
+              -e IGDB_CLIENT_ID="${{ secrets.IGDB_CLIENT_ID }}" \
+              -e IGDB_CLIENT_SECRET="${{ secrets.IGDB_CLIENT_SECRET }}" \
               --name pie-bot pie-bot
             docker image prune -f
