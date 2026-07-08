@@ -2542,7 +2542,7 @@ bot = MyBot(command_prefix="/", intents=intents)
 @discord.app_commands.command(name="한줄평", description="리뷰를 작성합니다.")
 @discord.app_commands.describe(
     카테고리="리뷰할 콘텐츠 종류",
-    링크="MangaDex, 웹소설, Spotify, YouTube Music 링크 (선택)",
+    링크="선택: 링크로 자동 입력. 지원: MangaDex, 웹소설, Spotify 트랙/앨범, YouTube Music 곡",
     기수="시즌/기/부 번호 (선택)",
     최신화="현재 공개된 최신 화/권 수 (진행률 계산용, 선택)"
 )
@@ -2563,7 +2563,10 @@ async def review_command(
 ):
     source_url = normalize_source_url(링크)
     if 링크 and not source_url:
-        await send_ephemeral_interaction(interaction, "❌ 유효하지 않은 링크입니다.")
+        await send_ephemeral_interaction(
+            interaction,
+            "❌ 링크 형식이 아닙니다. 예: `https://open.spotify.com/track/...` 또는 `https://music.youtube.com/watch?v=...`"
+        )
         return
 
     if source_url and should_handle_as_music_link(source_url, 카테고리):
@@ -2578,7 +2581,7 @@ async def review_command(
         if not music_info:
             await send_ephemeral_interaction(
                 interaction,
-                "❌ 음악 링크 정보를 가져오지 못했습니다. Spotify 트랙/앨범 또는 YouTube Music 곡 링크인지 확인해주세요."
+                "❌ 음악 정보를 가져오지 못했습니다. Spotify 트랙/앨범 링크 또는 YouTube Music 곡 링크를 넣어주세요."
             )
             return
 
@@ -2631,7 +2634,7 @@ async def review_command(
     if source_url and 카테고리 in MUSIC_CATEGORIES:
         await send_ephemeral_interaction(
             interaction,
-            "❌ 음악 링크는 Spotify 또는 YouTube Music 링크만 지원합니다."
+            "❌ 앨범/곡 링크는 Spotify 트랙/앨범 또는 YouTube Music 곡 링크만 지원합니다."
         )
         return
 
