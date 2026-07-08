@@ -234,6 +234,11 @@ def normalize_host(url):
     return host[4:] if host.startswith("www.") else host
 
 
+def is_missing_music_value(value):
+    value = str(value or "").strip()
+    return not value or value.lower() in {"n/a", "none", "unknown"} or value in {"미상", "정보 없음"}
+
+
 def is_music_link(url):
     source_url = normalize_source_url(url)
     if not source_url:
@@ -366,6 +371,17 @@ def best_youtube_thumbnail(thumbnails):
     return None
 
 
+def clean_youtube_track_title(title):
+    title = (title or "").strip()
+    title = re.sub(
+        r'\s*[\[(](?:official\s+)?(?:music\s+)?(?:video|mv|m/v|audio|lyrics?|visualizer|performance)[\])]$',
+        '',
+        title,
+        flags=re.IGNORECASE,
+    ).strip()
+    return title
+
+
 def clean_youtube_artist(author_name):
     artist = (author_name or "").strip()
     artist = re.sub(r'\s*-\s*Topic$', '', artist, flags=re.IGNORECASE).strip()
@@ -377,9 +393,23 @@ def parse_youtube_title_artist(title, author_name):
     artist = clean_youtube_artist(author_name)
     if " - " in title:
         left, right = [part.strip() for part in title.split(" - ", 1)]
-        if left and right and left.lower() == artist.lower():
-            return right, artist
-    return title, artist
+        if left and right:
+            return clean_youtube_track_title(right), left
+    return clean_youtube_track_title(title), artist
+
+
+def is_generic_youtube_artist(artist):
+    artist = (artist or "").lower()
+    generic_words = (
+        "official",
+        "records",
+        "recordings",
+        "labels",
+        "entertainment",
+        "music",
+        "vevo",
+    )
+    return any(word in artist for word in generic_words)
 
 
 async def fetch_page_meta(session, source_url):
@@ -406,6 +436,20 @@ async def fetch_page_meta(session, source_url):
     except Exception as e:
         print(f"[WARN] fetch_page_meta() failed: {e}")
         return {}
+
+
+async def resolve_redirect_url(session, source_url):
+    try:
+        async with session.get(
+            source_url,
+            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+            allow_redirects=True,
+        ) as response:
+            final_url = str(response.url)
+            return final_url if final_url and final_url != source_url else source_url
+    except Exception as e:
+        print(f"[WARN] resolve_redirect_url() failed: {e}")
+        return source_url
 
 
 async def get_spotify_access_token(session):
@@ -593,12 +637,101 @@ async def fetch_youtube_music_by_api(session, source_url, fallback_category):
     }
 
 
+async def fetch_musicbrainz_enrichment(session, category, title, artist):
+    if category not in MUSIC_CATEGORIES or not title:
+        return None
+
+    if category == "music_album":
+        endpoint = "release-group"
+        result_key = "release-groups"
+        title_field = "releasegroup"
+        result_builder = ContentSearcher._music_album_result
+    else:
+        endpoint = "recording"
+        result_key = "recordings"
+        title_field = "recording"
+        result_builder = ContentSearcher._music_track_result
+
+    title_query = ContentSearcher._musicbrainz_query_phrase(title)
+    artist_query = ContentSearcher._musicbrainz_query_phrase(artist) if artist and not is_generic_youtube_artist(artist) else None
+    query = f"{title_field}:{title_query}"
+    if artist_query:
+        query = f"{query} AND artist:{artist_query}"
+
+    try:
+        data = await ContentSearcher._musicbrainz_get(
+            session,
+            endpoint,
+            {"query": query, "limit": 5}
+        )
+    except Exception as e:
+        print(f"[WARN] fetch_musicbrainz_enrichment() failed: {e}")
+        return None
+
+    items = (data or {}).get(result_key) or []
+    if not items:
+        return None
+
+    if category == "music_album":
+        items = sorted(items, key=ContentSearcher._music_album_sort_key)
+
+    return result_builder(items[0])
+
+
+async def enrich_music_info_from_musicbrainz(session, music_info, prefer_artist=False, prefer_year=False):
+    if not music_info or not music_info.get("title"):
+        return music_info
+
+    category = music_info.get("category")
+    artist = music_info.get("director")
+    title = music_info.get("title")
+    should_enrich = (
+        prefer_artist
+        or prefer_year
+        or is_missing_music_value(artist)
+        or is_missing_music_value(music_info.get("year"))
+    )
+    if not should_enrich:
+        return music_info
+
+    try:
+        enrichment = await fetch_musicbrainz_enrichment(session, category, title, artist)
+    except Exception as e:
+        print(f"[WARN] enrich_music_info_from_musicbrainz() failed: {e}")
+        return music_info
+
+    if not enrichment:
+        return music_info
+
+    if (prefer_artist or is_missing_music_value(music_info.get("director"))) and not is_missing_music_value(enrichment.get("director")):
+        music_info["director"] = enrichment["director"]
+    if (prefer_year or is_missing_music_value(music_info.get("year"))) and not is_missing_music_value(enrichment.get("year")):
+        music_info["year"] = enrichment["year"]
+    if not music_info.get("musicbrainz_id") and enrichment.get("musicbrainz_id"):
+        music_info["musicbrainz_id"] = enrichment["musicbrainz_id"]
+        music_info["musicbrainz_type"] = enrichment.get("musicbrainz_type")
+    if not music_info.get("img_url") and enrichment.get("img_url"):
+        music_info["img_url"] = enrichment["img_url"]
+
+    provider = music_info.get("provider") or "music"
+    if "musicbrainz" not in provider:
+        music_info["provider"] = f"{provider}+musicbrainz"
+
+    return music_info
+
+
 async def fetch_spotify_music_by_url(session, source_url, fallback_category):
-    spotify_type, spotify_id = parse_spotify_type_from_url(source_url)
+    lookup_url = source_url
+    if normalize_host(source_url) == "spotify.link":
+        resolved_url = await resolve_redirect_url(session, source_url)
+        if normalize_host(resolved_url).endswith("spotify.com"):
+            lookup_url = resolved_url
+
+    spotify_type, spotify_id = parse_spotify_type_from_url(lookup_url)
     oembed_data = {}
 
     if not spotify_type or not spotify_id:
-        oembed_data = await fetch_spotify_oembed(session, source_url)
+        oembed_data = await fetch_spotify_oembed(session, lookup_url)
         spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
 
     api_result = await fetch_spotify_music_by_api(session, spotify_type, spotify_id, source_url)
@@ -612,7 +745,7 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
     else:
         category = fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
 
-    page_meta = await fetch_page_meta(session, source_url)
+    page_meta = await fetch_page_meta(session, lookup_url)
     page_type = (page_meta.get("type") or "").lower()
     if not spotify_type and page_type in ("music.song", "music: song"):
         spotify_type = "track"
@@ -636,7 +769,7 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
 
     if not title or not img_url or not spotify_type:
         if not oembed_data:
-            oembed_data = await fetch_spotify_oembed(session, source_url)
+            oembed_data = await fetch_spotify_oembed(session, lookup_url)
 
         if not spotify_type:
             spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
@@ -656,7 +789,7 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
     if not title:
         return None
 
-    return {
+    music_info = {
         "title": title,
         "year": year,
         "director": artist,
@@ -666,12 +799,18 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
         "provider_id": spotify_id,
         "provider": "spotify",
     }
+    return await enrich_music_info_from_musicbrainz(session, music_info)
 
 
 async def fetch_youtube_music_by_url(session, source_url, fallback_category):
     api_result = await fetch_youtube_music_by_api(session, source_url, fallback_category)
     if api_result and api_result.get("title"):
-        return api_result
+        return await enrich_music_info_from_musicbrainz(
+            session,
+            api_result,
+            prefer_artist=True,
+            prefer_year=True
+        )
 
     parsed = urlparse(source_url)
     query = parse_qs(parsed.query)
@@ -715,7 +854,7 @@ async def fetch_youtube_music_by_url(session, source_url, fallback_category):
     if not title:
         return None
 
-    return {
+    music_info = {
         "title": title,
         "year": year or "N/A",
         "director": artist or "미상",
@@ -724,6 +863,12 @@ async def fetch_youtube_music_by_url(session, source_url, fallback_category):
         "source_url": source_url,
         "provider": "youtube_music",
     }
+    return await enrich_music_info_from_musicbrainz(
+        session,
+        music_info,
+        prefer_artist=True,
+        prefer_year=True
+    )
 
 
 async def fetch_music_by_url(session, source_url, fallback_category):
@@ -2423,7 +2568,7 @@ async def review_command(
 
     if source_url and should_handle_as_music_link(source_url, 카테고리):
         try:
-            timeout = aiohttp.ClientTimeout(total=2.3)
+            timeout = aiohttp.ClientTimeout(total=2.8)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 music_info = await fetch_music_by_url(session, source_url, 카테고리)
         except Exception as e:
@@ -2443,6 +2588,20 @@ async def review_command(
             music_info.get('year') or "N/A",
             music_info.get('director') or "미상",
             music_info.get('img_url')
+        )
+        if music_info.get('musicbrainz_id'):
+            prefetched_info = (
+                music_info['title'],
+                music_info.get('year') or "N/A",
+                music_info.get('director') or "미상",
+                music_info.get('img_url'),
+                music_info.get('musicbrainz_id')
+            )
+        print(
+            f"[DEBUG] review_command() 음악 링크 조회 성공 - "
+            f"provider={music_info.get('provider')}, title={music_info.get('title')}, "
+            f"artist={music_info.get('director')}, year={music_info.get('year')}",
+            flush=True
         )
         modal = ReviewForm(
             bot.db,
