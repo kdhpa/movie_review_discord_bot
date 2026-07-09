@@ -984,11 +984,11 @@ async def enrich_game_info_from_igdb(session, game_info):
     return game_info
 
 
-async def fetch_steam_game_by_url(session, source_url):
-    steam_appid = parse_steam_appid(source_url)
+async def fetch_steam_game_by_appid(session, steam_appid, source_url=None):
     if not steam_appid:
         return None
 
+    source_url = source_url or f"https://store.steampowered.com/app/{steam_appid}"
     try:
         async with session.get(
             "https://store.steampowered.com/api/appdetails",
@@ -1021,6 +1021,71 @@ async def fetch_steam_game_by_url(session, source_url):
         "provider": "steam_store",
     }
     return game_info
+
+
+async def fetch_steam_game_by_url(session, source_url):
+    steam_appid = parse_steam_appid(source_url)
+    return await fetch_steam_game_by_appid(session, steam_appid, source_url)
+
+
+async def search_steam_games(session, title, limit=5):
+    if not title:
+        return []
+
+    try:
+        async with session.get(
+            "https://store.steampowered.com/api/storesearch/",
+            params={"term": title, "cc": "kr", "l": "koreana"},
+            headers={"User-Agent": "PieDiscordReviewBot/1.0"},
+        ) as response:
+            if response.status != 200:
+                print(f"[WARN] Steam storesearch API status={response.status}")
+                return []
+            data = await response.json()
+    except Exception as e:
+        print(f"[WARN] Steam storesearch API failed: {e}")
+        return []
+
+    results = []
+    seen = set()
+    for item in (data or {}).get("items", []):
+        steam_appid = item.get("id") or item.get("appid")
+        if not steam_appid or steam_appid in seen:
+            continue
+        seen.add(steam_appid)
+
+        game_info = await fetch_steam_game_by_appid(session, steam_appid)
+        if not game_info:
+            game_info = {
+                "title": item.get("name") or "N/A",
+                "year": "N/A",
+                "director": "미상",
+                "img_url": item.get("tiny_image"),
+                "category": "game",
+                "steam_appid": steam_appid,
+                "source_url": f"https://store.steampowered.com/app/{steam_appid}",
+                "provider": "steam_search",
+            }
+        results.append(game_info)
+        if len(results) >= limit:
+            break
+
+    normalized_query = normalize_game_search_text(title)
+    return sorted(
+        results,
+        key=lambda game: (
+            normalize_game_search_text(game.get("title")) != normalized_query,
+            not normalize_game_search_text(game.get("title")).startswith(normalized_query),
+            game.get("year") == "N/A",
+        )
+    )
+
+
+async def search_game_candidates(session, title, limit=5):
+    igdb_results = await search_igdb_games(session, title, limit=limit)
+    if igdb_results:
+        return igdb_results
+    return await search_steam_games(session, title, limit=limit)
 
 
 async def fetch_game_by_url(session, source_url):
@@ -2146,7 +2211,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 return
 
             elif self.category == 'game':
-                game_results = await search_igdb_games(session, title)
+                game_results = await search_game_candidates(session, title)
 
                 if not game_results:
                     print(f"[DEBUG] ReviewForm.on_submit() 게임 검색 실패 - 결과 없음")
@@ -2596,7 +2661,7 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                         music = await ContentSearcher.hydrate_music_result(session, music_results[0])
                         img_url = music.get('img_url')
                 elif search_category == 'game':
-                    game_results = await search_igdb_games(session, title, limit=1)
+                    game_results = await search_game_candidates(session, title, limit=1)
                     if game_results:
                         img_url = game_results[0].get('img_url')
 
