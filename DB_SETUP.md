@@ -99,7 +99,7 @@ Logged in as YourBot#1234
 
 ### `contents` 테이블
 
-작품/콘텐츠 메타데이터를 저장합니다. 음악 평론은 `music_album`, `music_track` 카테고리를 사용하며 `musicbrainz_id`, `musicbrainz_type`으로 MusicBrainz 항목을 구분합니다.
+작품/콘텐츠 메타데이터를 저장합니다. 음악 평론은 `music_track` 카테고리를 사용하며 `musicbrainz_id`, `musicbrainz_type`으로 MusicBrainz 항목을 구분합니다.
 
 ### `review_logs` 테이블
 
@@ -112,11 +112,11 @@ Logged in as YourBot#1234
 봇이 실행되면 Discord에서 다음 명령어 사용 가능:
 
 ### `/한줄평`
-- 영화/드라마/애니/만화/웹툰/웹소설/게임/앨범/곡 리뷰 작성
+- 영화/드라마/애니/만화/웹툰/웹소설/게임/곡 리뷰 작성
 - `기수`, `최신화` 옵션으로 시즌/부와 진행률 표시 지원
 - 웹소설은 `링크` 옵션으로 노벨피아/문피아/카카오페이지/시리즈/리디 링크 저장 및 메타데이터 크롤링 시도
 - 게임은 `링크` 옵션으로 Steam 상점 링크를 넣으면 제목/개발사/출시년도/커버를 채운 입력창을 바로 엽니다. 제목 입력 검색은 `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`으로 IGDB API를 사용합니다.
-- 앨범/곡은 `링크` 옵션으로 Spotify 트랙/앨범 또는 YouTube Music 곡 링크를 넣으면 제목/아티스트/커버를 채운 입력창을 바로 엽니다. `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`이 있으면 Spotify Web API를 먼저 쓰고, `YOUTUBE_API_KEY`가 있으면 YouTube Data API를 먼저 씁니다. YouTube/fallback 결과의 아티스트나 발매년도가 애매하면 MusicBrainz API로 한 번 보강하고, 그래도 실패할 때 페이지 메타/oEmbed를 마지막 fallback으로 사용합니다.
+- 곡은 `링크` 옵션으로 Spotify 트랙 또는 YouTube Music 곡 링크를 넣으면 제목/아티스트/커버를 채운 입력창을 바로 엽니다. `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`이 있으면 Spotify Web API를 먼저 쓰고, `YOUTUBE_API_KEY`가 있으면 YouTube Data API를 먼저 씁니다. YouTube/fallback 결과의 아티스트나 발매년도가 애매하면 MusicBrainz API로 한 번 보강하고, 그래도 실패할 때 페이지 메타/oEmbed를 마지막 fallback으로 사용합니다.
 - DB에 자동 저장됨
 
 ### `/내리뷰`

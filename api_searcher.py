@@ -372,26 +372,6 @@ class ContentSearcher:
         return None
 
     @staticmethod
-    def _music_album_result(item):
-        musicbrainz_id = item.get('id')
-        title = item.get('title') or "N/A"
-        artist = ContentSearcher._musicbrainz_artist_credit(item)
-        year = ContentSearcher._first_year(item.get('first-release-date'))
-        primary_type = item.get('primary-type') or "Release Group"
-
-        return {
-            'title': title,
-            'year': year,
-            'director': artist,
-            'img_url': None,
-            'category': 'music_album',
-            'musicbrainz_id': musicbrainz_id,
-            'musicbrainz_type': 'release-group',
-            'music_primary_type': primary_type,
-            'source_url': ContentSearcher._musicbrainz_source_url('release-group', musicbrainz_id),
-        }
-
-    @staticmethod
     def _music_track_result(item):
         musicbrainz_id = item.get('id')
         title = item.get('title') or "N/A"
@@ -422,17 +402,6 @@ class ContentSearcher:
         }
 
     @staticmethod
-    def _music_album_sort_key(item):
-        primary_type = (item.get('primary-type') or '').lower()
-        type_rank = {'album': 0, 'ep': 1, 'single': 2}
-        score = item.get('score')
-        try:
-            score_value = -int(score)
-        except (TypeError, ValueError):
-            score_value = 0
-        return (type_rank.get(primary_type, 3), score_value)
-
-    @staticmethod
     async def _search_musicbrainz(session, endpoint, queries, result_key, result_builder, sort_key=None):
         seen = set()
         for query in queries:
@@ -460,32 +429,6 @@ class ContentSearcher:
             if results:
                 return results
         return []
-
-    @staticmethod
-    async def search_music_album_multiple(session, name, artist=None):
-        """MusicBrainz에서 앨범/EP/싱글 release-group 후보를 검색한다."""
-        title_query = ContentSearcher._musicbrainz_query_phrase(name)
-        queries = []
-        if artist:
-            artist_query = ContentSearcher._musicbrainz_query_phrase(artist)
-            queries.append(f"releasegroup:{title_query} AND artist:{artist_query}")
-        queries.append(f"releasegroup:{title_query}")
-
-        translated = await translate_to_english(name)
-        if translated and translated != name:
-            translated_query = ContentSearcher._musicbrainz_query_phrase(translated)
-            if artist:
-                queries.append(f"releasegroup:{translated_query} AND artist:{artist_query}")
-            queries.append(f"releasegroup:{translated_query}")
-
-        return await ContentSearcher._search_musicbrainz(
-            session,
-            'release-group',
-            queries,
-            'release-groups',
-            ContentSearcher._music_album_result,
-            ContentSearcher._music_album_sort_key
-        )
 
     @staticmethod
     async def search_music_track_multiple(session, name, artist=None):
@@ -814,7 +757,7 @@ Extract the following fields and return ONLY valid JSON (no markdown, no explana
 - title: The title of the content being reviewed (movie, drama, anime, manga, webtoon, webnovel, album, track)
 - score: Rating score (convert to 0-5 scale, e.g. "8/10" → 4.0, "A+" → 5.0, "별 4개" → 4.0)
 - one_line_review: The main review comment or opinion
-- category: One of "movie", "drama", "anime", "manga", "webtoon", "webnovel", "music_album", "music_track" (guess based on context)
+- category: One of "movie", "drama", "anime", "manga", "webtoon", "webnovel", "music_track" (guess based on context)
 - season: Season/part number if mentioned (e.g. "2기", "시즌3", "1부"; otherwise null)
 - year: Release year if mentioned (otherwise null)
 - director: Director, author, or artist name if mentioned (otherwise null)

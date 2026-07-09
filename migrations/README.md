@@ -11,6 +11,7 @@
 2. ✅ 진행도 기반 리뷰 지원 (`unit_from`, `unit_to` 컬럼 추가)
 3. ✅ 외부 ID 저장 (`tmdb_id`, `mangadex_id`, `naver_title_id`)
 4. ✅ 같은 작품에 대해 여러 구간 리뷰 누적 가능
+5. ✅ 음악 리뷰를 곡(`music_track`) 기준으로 정리하고 앨범 리뷰 제거
 
 ---
 

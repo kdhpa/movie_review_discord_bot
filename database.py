@@ -223,19 +223,19 @@ class Database:
             cursor.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_title_category_unique
                 ON contents(title, category)
-                WHERE category NOT IN ('music_album', 'music_track', 'game')
+                WHERE category NOT IN ('music_track', 'game')
             ''')
             cursor.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_music_mbid_unique
                 ON contents(musicbrainz_id, category)
                 WHERE musicbrainz_id IS NOT NULL
-                  AND category IN ('music_album', 'music_track')
+                  AND category = 'music_track'
             ''')
             cursor.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_music_title_creator_unique
                 ON contents(title, category, COALESCE(creator, ''))
                 WHERE musicbrainz_id IS NULL
-                  AND category IN ('music_album', 'music_track')
+                  AND category = 'music_track'
             ''')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_contents_category ON contents(category)
@@ -359,7 +359,7 @@ class Database:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cursor:
-                    is_music = category in ('music_album', 'music_track')
+                    is_music = category == 'music_track'
 
                     if is_music and musicbrainz_id:
                         cursor.execute('''

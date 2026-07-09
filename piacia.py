@@ -11,16 +11,15 @@ from review_form import (
     MANGA_FORM,
     WEBTOON_FORM,
     WEBNOVEL_FORM,
-    MUSIC_ALBUM_FORM,
     MUSIC_TRACK_FORM,
     GAME_FORM,
     format_season,
 )
 
 # 카테고리별 이모지 및 이름 매핑
-CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱", "webnovel": "📖", "music_album": "💿", "music_track": "🎵", "game": "🎮"}
-CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰", "webnovel": "웹소설", "music_album": "앨범", "music_track": "곡", "game": "게임"}
-MUSIC_CATEGORIES = {"music_album", "music_track"}
+CATEGORY_EMOJI = {"movie": "🎬", "drama": "📺", "anime": "🎌", "manga": "📚", "webtoon": "📱", "webnovel": "📖", "music_track": "🎵", "game": "🎮"}
+CATEGORY_NAME = {"movie": "영화", "drama": "드라마", "anime": "애니", "manga": "만화", "webtoon": "웹툰", "webnovel": "웹소설", "music_track": "곡", "game": "게임"}
+MUSIC_CATEGORIES = {"music_track"}
 GAME_CATEGORIES = {"game"}
 PROGRESS_UNIT_LABELS = {"manga": "권", "webtoon": "화", "webnovel": "화"}
 WEBNOVEL_PLATFORM_ALIASES = {
@@ -314,12 +313,6 @@ def parse_youtube_video_id(url):
     return query.get("v", [None])[0]
 
 
-def parse_youtube_playlist_id(url):
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-    return query.get("list", [None])[0]
-
-
 def parse_youtube_music_type(url):
     parsed = urlparse(url)
     host = normalize_host(url)
@@ -531,14 +524,14 @@ async def fetch_spotify_oembed(session, source_url):
 
 
 async def fetch_spotify_music_by_api(session, spotify_type, spotify_id, source_url):
-    if spotify_type not in ("track", "album") or not spotify_id:
+    if spotify_type != "track" or not spotify_id:
         return None
 
     token = await get_spotify_access_token(session)
     if not token:
         return None
 
-    endpoint = "tracks" if spotify_type == "track" else "albums"
+    endpoint = "tracks"
     try:
         async with session.get(
             f"https://api.spotify.com/v1/{endpoint}/{spotify_id}",
@@ -552,27 +545,14 @@ async def fetch_spotify_music_by_api(session, spotify_type, spotify_id, source_u
         print(f"[WARN] Spotify {endpoint} API failed: {e}")
         return None
 
-    if spotify_type == "track":
-        album = data.get("album") or {}
-        images = album.get("images") or []
-        return {
-            "title": data.get("name"),
-            "year": first_year_from_text(album.get("release_date")) or "N/A",
-            "director": ", ".join(artist.get("name") for artist in data.get("artists", []) if artist.get("name")) or "미상",
-            "img_url": images[0].get("url") if images else None,
-            "category": "music_track",
-            "source_url": source_url,
-            "provider_id": spotify_id,
-            "provider": "spotify_api",
-        }
-
-    images = data.get("images") or []
+    album = data.get("album") or {}
+    images = album.get("images") or []
     return {
         "title": data.get("name"),
-        "year": first_year_from_text(data.get("release_date")) or "N/A",
+        "year": first_year_from_text(album.get("release_date")) or "N/A",
         "director": ", ".join(artist.get("name") for artist in data.get("artists", []) if artist.get("name")) or "미상",
         "img_url": images[0].get("url") if images else None,
-        "category": "music_album",
+        "category": "music_track",
         "source_url": source_url,
         "provider_id": spotify_id,
         "provider": "spotify_api",
@@ -583,44 +563,11 @@ async def fetch_youtube_music_by_api(session, source_url, fallback_category):
     if not YOUTUBE_API_KEY:
         return None
 
-    category = parse_youtube_music_type(source_url) or (
-        fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
-    )
+    detected_category = parse_youtube_music_type(source_url)
+    if detected_category == "music_album":
+        return None
+    category = "music_track"
     video_id = parse_youtube_video_id(source_url)
-    playlist_id = parse_youtube_playlist_id(source_url)
-
-    if category == "music_album" and playlist_id:
-        try:
-            async with session.get(
-                "https://www.googleapis.com/youtube/v3/playlists",
-                params={
-                    "part": "snippet",
-                    "id": playlist_id,
-                    "key": YOUTUBE_API_KEY,
-                },
-            ) as response:
-                if response.status != 200:
-                    print(f"[WARN] YouTube playlists API status={response.status}")
-                    return None
-                data = await response.json()
-        except Exception as e:
-            print(f"[WARN] YouTube playlists API failed: {e}")
-            return None
-
-        items = data.get("items") or []
-        if not items:
-            return None
-        snippet = items[0].get("snippet") or {}
-        return {
-            "title": snippet.get("title"),
-            "year": first_year_from_text(snippet.get("publishedAt")) or "N/A",
-            "director": clean_youtube_artist(snippet.get("channelTitle")),
-            "img_url": best_youtube_thumbnail(snippet.get("thumbnails")),
-            "category": "music_album",
-            "source_url": source_url,
-            "provider_id": playlist_id,
-            "provider": "youtube_data_api",
-        }
 
     if not video_id:
         return None
@@ -667,16 +614,10 @@ async def fetch_musicbrainz_enrichment(session, category, title, artist):
     if category not in MUSIC_CATEGORIES or not title:
         return None
 
-    if category == "music_album":
-        endpoint = "release-group"
-        result_key = "release-groups"
-        title_field = "releasegroup"
-        result_builder = ContentSearcher._music_album_result
-    else:
-        endpoint = "recording"
-        result_key = "recordings"
-        title_field = "recording"
-        result_builder = ContentSearcher._music_track_result
+    endpoint = "recording"
+    result_key = "recordings"
+    title_field = "recording"
+    result_builder = ContentSearcher._music_track_result
 
     title_query = ContentSearcher._musicbrainz_query_phrase(title)
     artist_query = ContentSearcher._musicbrainz_query_phrase(artist) if artist and not is_generic_youtube_artist(artist) else None
@@ -697,9 +638,6 @@ async def fetch_musicbrainz_enrichment(session, category, title, artist):
     items = (data or {}).get(result_key) or []
     if not items:
         return None
-
-    if category == "music_album":
-        items = sorted(items, key=ContentSearcher._music_album_sort_key)
 
     return result_builder(items[0])
 
@@ -760,13 +698,14 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
         oembed_data = await fetch_spotify_oembed(session, lookup_url)
         spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
 
+    if spotify_type == "album":
+        return None
+
     api_result = await fetch_spotify_music_by_api(session, spotify_type, spotify_id, source_url)
     if api_result and api_result.get("title"):
         return api_result
 
-    if spotify_type == "album":
-        category = "music_album"
-    elif spotify_type == "track":
+    if spotify_type == "track":
         category = "music_track"
     else:
         category = fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
@@ -777,8 +716,7 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
         spotify_type = "track"
         category = "music_track"
     elif not spotify_type and page_type in ("music.album", "music: album"):
-        spotify_type = "album"
-        category = "music_album"
+        return None
 
     title, page_artist = clean_spotify_title(page_meta.get("title"), category)
     artist = (
@@ -800,7 +738,7 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
         if not spotify_type:
             spotify_type, spotify_id = parse_spotify_type_from_embed(oembed_data.get("html"))
             if spotify_type == "album":
-                category = "music_album"
+                return None
             elif spotify_type == "track":
                 category = "music_track"
 
@@ -829,6 +767,9 @@ async def fetch_spotify_music_by_url(session, source_url, fallback_category):
 
 
 async def fetch_youtube_music_by_url(session, source_url, fallback_category):
+    if parse_youtube_music_type(source_url) == "music_album":
+        return None
+
     api_result = await fetch_youtube_music_by_api(session, source_url, fallback_category)
     if api_result and api_result.get("title"):
         return await enrich_music_info_from_musicbrainz(
@@ -844,9 +785,7 @@ async def fetch_youtube_music_by_url(session, source_url, fallback_category):
     if normalize_host(source_url) == "music.youtube.com" and parsed.path.startswith("/watch") and query.get("v"):
         oembed_url = f"https://www.youtube.com/watch?v={query['v'][0]}"
 
-    category = parse_youtube_music_type(source_url) or (
-        fallback_category if fallback_category in MUSIC_CATEGORIES else "music_track"
-    )
+    category = "music_track"
 
     oembed_data = {}
     try:
@@ -1090,30 +1029,6 @@ async def fetch_game_by_url(session, source_url):
     return None
 
 
-async def defer_ephemeral_interaction(interaction: discord.Interaction, context: str) -> bool:
-    if interaction.response.is_done():
-        return True
-
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        return True
-    except discord.HTTPException as e:
-        code = getattr(e, "code", None)
-        if code == 40060:
-            print(
-                f"[WARN] {context} initial defer skipped - interaction already acknowledged",
-                flush=True
-            )
-            return True
-        if code == 10062:
-            print(
-                f"[ERROR] {context} initial defer failed - unknown interaction",
-                flush=True
-            )
-            return False
-        raise
-
-
 async def send_ephemeral_interaction(
     interaction: discord.Interaction,
     content: str,
@@ -1122,7 +1037,10 @@ async def send_ephemeral_interaction(
 ) -> bool:
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(content, view=view, ephemeral=True)
+            if interaction.response.type == discord.InteractionResponseType.deferred_channel_message:
+                await interaction.edit_original_response(content=content, view=view)
+            else:
+                await interaction.followup.send(content, view=view, ephemeral=True)
         else:
             await interaction.response.send_message(content, view=view, ephemeral=True)
         return True
@@ -1542,16 +1460,6 @@ async def _save_and_send_review(
             one_line_text=line_comment,
             author_name = display_name
         )
-    elif db_category == 'music_album':
-        filled_form = MUSIC_ALBUM_FORM.format(
-            title=title,
-            season_text=season_text,
-            artist=director,
-            year=year,
-            score=return_score_emoji(score_float),
-            one_line_text=line_comment,
-            author_name=display_name
-        )
     elif db_category == 'music_track':
         filled_form = MUSIC_TRACK_FORM.format(
             title=title,
@@ -1695,7 +1603,7 @@ class MovieSelectMenu(discord.ui.Select):
                     session, movie['tmdb_id'], movie['media_type']
                 )
 
-        movie['season'] = None if movie['category'] in ('movie', 'music_album', 'music_track', 'game') else self.form.season
+        movie['season'] = None if movie['category'] in ('movie', 'music_track', 'game') else self.form.season
         movie['latest_units'] = self.form.latest_units
 
         # 리뷰 저장 및 전송 - form에서 직접 참조
@@ -1839,7 +1747,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
 
             title_input = discord.ui.TextInput(
                 label="음악 이름",
-                placeholder="앨범명 또는 곡명을 입력하세요"
+                placeholder="곡명을 입력하세요"
             )
             if title_default:
                 title_input.default = title_default
@@ -2044,7 +1952,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 'director': director,
                 'img_url': img_url,
                 'category': prefetched_db_category,
-                'season': None if prefetched_db_category in ('movie', 'music_album', 'music_track') else self.season,
+                'season': None if prefetched_db_category in ('movie', 'music_track') else self.season,
                 'latest_units': self.latest_units,
                 'source_url': self.source_url
             }
@@ -2058,7 +1966,7 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                     movie_info['naver_title_id'] = external_id
                 elif prefetched_db_category in MUSIC_CATEGORIES:
                     movie_info['musicbrainz_id'] = external_id
-                    movie_info['musicbrainz_type'] = 'release-group' if prefetched_db_category == 'music_album' else 'recording'
+                    movie_info['musicbrainz_type'] = 'recording'
                 elif prefetched_db_category == 'game':
                     if isinstance(external_id, dict):
                         movie_info['igdb_id'] = external_id.get('igdb_id')
@@ -2191,18 +2099,11 @@ class ReviewForm(discord.ui.Modal, title="한줄평 작성"):
                 return
 
             elif self.category in MUSIC_CATEGORIES:
-                if self.category == 'music_album':
-                    music_results = await ContentSearcher.search_music_album_multiple(
-                        session,
-                        title,
-                        artist=self.music_artist_query
-                    )
-                else:
-                    music_results = await ContentSearcher.search_music_track_multiple(
-                        session,
-                        title,
-                        artist=self.music_artist_query
-                    )
+                music_results = await ContentSearcher.search_music_track_multiple(
+                    session,
+                    title,
+                    artist=self.music_artist_query
+                )
 
                 if not music_results:
                     print(f"[DEBUG] ReviewForm.on_submit() 음악 검색 실패 - 결과 없음")
@@ -2567,16 +2468,6 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                 one_line_text=one_line_review,
                 author_name=self.display_name
             )
-        elif search_category == 'music_album':
-            filled_form = MUSIC_ALBUM_FORM.format(
-                title=title,
-                season_text=season_text,
-                artist=director,
-                year=year,
-                score=return_score_emoji(score),
-                one_line_text=one_line_review,
-                author_name=self.display_name
-            )
         elif search_category == 'music_track':
             filled_form = MUSIC_TRACK_FORM.format(
                 title=title,
@@ -2695,15 +2586,6 @@ class EditReviewForm(discord.ui.Modal, title="리뷰 수정"):
                     fetched_info = await fetch_webnovel_by_url(session, self.review_data['source_url'])
                     if fetched_info:
                         _, _, _, img_url, _ = fetched_info
-                elif search_category == 'music_album':
-                    music_results = await ContentSearcher.search_music_album_multiple(
-                        session,
-                        title,
-                        artist=director
-                    )
-                    if music_results:
-                        music = await ContentSearcher.hydrate_music_result(session, music_results[0])
-                        img_url = music.get('img_url')
                 elif search_category == 'music_track':
                     music_results = await ContentSearcher.search_music_track_multiple(
                         session,
@@ -2838,7 +2720,6 @@ bot = MyBot(command_prefix="/", intents=intents)
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
     discord.app_commands.Choice(name="🎮 게임", value="game"),
-    discord.app_commands.Choice(name="💿 앨범", value="music_album"),
     discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
 async def review_command(
@@ -2868,7 +2749,7 @@ async def review_command(
         if not music_info:
             await send_ephemeral_interaction(
                 interaction,
-                "❌ 음악 정보를 가져오지 못했습니다. Spotify 트랙/앨범 링크 또는 YouTube Music 곡 링크를 넣어주세요."
+                "❌ 음악 정보를 가져오지 못했습니다. Spotify 트랙 링크 또는 YouTube Music 곡 링크를 넣어주세요."
             )
             return
 
@@ -2921,7 +2802,7 @@ async def review_command(
     if source_url and 카테고리 in MUSIC_CATEGORIES:
         await send_ephemeral_interaction(
             interaction,
-            "❌ 앨범/곡 링크는 Spotify 트랙/앨범 또는 YouTube Music 곡 링크만 지원합니다."
+            "❌ 곡 링크는 Spotify 트랙 또는 YouTube Music 곡 링크만 지원합니다."
         )
         return
 
@@ -2989,9 +2870,6 @@ async def review_command(
                 )
         return
 
-    if not await defer_ephemeral_interaction(interaction, "review_command()"):
-        return
-
     detected_webnovel_platform = detect_webnovel_platform_from_url(source_url) if source_url else None
     if detected_webnovel_platform and 카테고리 != 'webnovel':
         print(
@@ -3052,7 +2930,6 @@ async def review_command(
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
     discord.app_commands.Choice(name="게임", value="game"),
-    discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def my_reviews_command(interaction: discord.Interaction, 카테고리: str = "all"):
@@ -3119,7 +2996,6 @@ async def my_reviews_command(interaction: discord.Interaction, 카테고리: str
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
     discord.app_commands.Choice(name="게임", value="game"),
-    discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def stats_command(interaction: discord.Interaction, 제목: str, 카테고리: str = "all"):
@@ -3156,7 +3032,6 @@ async def stats_command(interaction: discord.Interaction, 제목: str, 카테고
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
     discord.app_commands.Choice(name="🎮 게임", value="game"),
-    discord.app_commands.Choice(name="💿 앨범", value="music_album"),
     discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
 async def review_history_command(
@@ -3250,7 +3125,6 @@ async def review_history_command(
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
     discord.app_commands.Choice(name="게임", value="game"),
-    discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def delete_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None, 기수: int = None):
@@ -3345,7 +3219,6 @@ async def delete_review_command(interaction: discord.Interaction, 제목: str, �
     discord.app_commands.Choice(name="웹툰", value="webtoon"),
     discord.app_commands.Choice(name="웹소설", value="webnovel"),
     discord.app_commands.Choice(name="게임", value="game"),
-    discord.app_commands.Choice(name="앨범", value="music_album"),
     discord.app_commands.Choice(name="곡", value="music_track"),
 ])
 async def edit_review_command(interaction: discord.Interaction, 제목: str, 카테고리: str = None, 기수: int = None):
@@ -3363,6 +3236,12 @@ async def edit_review_command(interaction: discord.Interaction, 제목: str, 카
         season_text = format_season(카테고리, season_value) if 카테고리 else ""
         await interaction.response.send_message(
             f"❌ '{제목}{season_text}'{cat_text} 리뷰를 찾을 수 없습니다.",
+            ephemeral=True
+        )
+        return
+    if review.get('category') == 'music_album':
+        await interaction.response.send_message(
+            "❌ 앨범 리뷰는 더 이상 지원하지 않습니다. 삭제 후 곡 리뷰로 새로 작성해주세요.",
             ephemeral=True
         )
         return
@@ -3435,6 +3314,12 @@ async def edit_review_context(interaction: discord.Interaction, message: discord
             f"❌ '{title}' 리뷰를 찾을 수 없거나 본인의 리뷰가 아닙니다.", ephemeral=True
         )
         return
+    if review.get('category') == 'music_album':
+        await interaction.response.send_message(
+            "❌ 앨범 리뷰는 더 이상 지원하지 않습니다. 삭제 후 곡 리뷰로 새로 작성해주세요.",
+            ephemeral=True
+        )
+        return
 
     if not is_current_review_message(review, message):
         await interaction.response.send_message(
@@ -3463,7 +3348,6 @@ CATEGORY_TO_SEARCH = {
     'manga': 'manga',
     'webtoon': 'webtoon',
     'webnovel': 'webnovel',
-    'music_album': 'music_album',
     'music_track': 'music_track',
     'game': 'game',
 }
@@ -3494,7 +3378,13 @@ async def write_review_context(interaction: discord.Interaction, message: discor
     if not img_url:
         img_url = message.attachments[0].url if message.attachments else None
 
-    search_category = CATEGORY_TO_SEARCH[db_category]
+    search_category = CATEGORY_TO_SEARCH.get(db_category)
+    if not search_category:
+        await interaction.response.send_message(
+            "❌ 앨범 리뷰는 더 이상 지원하지 않습니다. 곡 리뷰로 새로 작성해주세요.",
+            ephemeral=True
+        )
+        return
     prefetched_info = (title, year, director, img_url)
 
     modal = ReviewForm(
@@ -3717,7 +3607,6 @@ async def migration_command(interaction: discord.Interaction, 채널: discord.Te
     discord.app_commands.Choice(name="📱 웹툰", value="webtoon"),
     discord.app_commands.Choice(name="📖 웹소설", value="webnovel"),
     discord.app_commands.Choice(name="🎮 게임", value="game"),
-    discord.app_commands.Choice(name="💿 앨범", value="music_album"),
     discord.app_commands.Choice(name="🎵 곡", value="music_track"),
 ])
 async def ranking_command(interaction: discord.Interaction, 카테고리: discord.app_commands.Choice[str] = None):

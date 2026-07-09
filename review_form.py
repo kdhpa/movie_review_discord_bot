@@ -63,18 +63,6 @@ WEBNOVEL_FORM = (
     "작성자: {author_name} \n"
 )
 
-MUSIC_ALBUM_FORM = (
-    "💿제목: {title}{season_text}\n"
-    "🎤아티스트: {artist}\n"
-    "📅발매년도: {year}\n"
-    "\n"
-    "평점 : {score} \n"
-    "\n"
-    "\"{one_line_text}\"\n"
-    "\n"
-    "작성자: {author_name} \n"
-)
-
 MUSIC_TRACK_FORM = (
     "🎵제목: {title}{season_text}\n"
     "🎤아티스트: {artist}\n"
